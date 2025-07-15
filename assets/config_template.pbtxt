@@ -1,0 +1,54 @@
+name: "yolov9-e-fp16"
+platform: "tensorrt_plan"
+max_batch_size: 32  # adjust to your expected batch size limits
+
+input [
+  {
+    name: "images"  # use actual input name from ONNX/TRT model
+    data_type: TYPE_FP16  # or TYPE_FP16 if using FP16 engine
+    dims: [3, 640, 640]
+  }
+]
+
+output [
+  {
+    name: "output"  # use actual output name(s)
+    data_type: TYPE_FP16  # or TYPE_FP16 if your model outputs that
+    dims: [84, 8400]  # placeholder; match your YOLOv9 output
+  }
+]
+
+instance_group [
+  {
+    kind: KIND_GPU
+    count: 1
+    gpus: [0]  # adjust if using multiple GPUs
+  }
+]
+
+dynamic_batching {
+  max_queue_delay_microseconds: 500 # (tune between 100-1000)
+  preferred_batch_size: [16, 32]  # triton will try to pad to these sizes
+}
+
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator : [ 
+      {
+        name : "tensorrt"
+        parameters { key: "precision_mode" value: "FP16" } # FP16/FP32
+      }
+    ]
+  }
+  input_pinned_memory {
+    enable: true
+  }
+  output_pinned_memory {
+    enable: true
+  }
+}
+
+# Optional: control max number of concurrent model executions (advanced tuning)
+model_transaction_policy {
+  decoupled: false
+}

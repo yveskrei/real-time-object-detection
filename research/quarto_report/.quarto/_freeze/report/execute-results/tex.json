@@ -1,0 +1,11 @@
+{
+  "hash": "ed215158a7e6537cce8ed64d797b12f7",
+  "result": {
+    "engine": "jupyter",
+    "markdown": "<!-- Creating a new section in Hebrew -->\n\n\\begin{RTL}\n\\section*{כותרת משנה בעברית}\n\nטקסט רגיל שכותבים בעברית\n\\end{RTL}\n\n<!-- Displaying a plot using python -->\n\\begin{RTL}\nגרף שנוצר באמצעות פייתון\n\\end{RTL}\n\n::: {.cell execution_count=1}\n\n::: {.cell-output .cell-output-display}\n![](report_files/figure-pdf/cell-2-output-1.png){}\n:::\n:::\n\n\n<!-- Displaying a plot using a static image -->\n\\begin{RTL}\nגרף שנוסף כתמונה\n\\end{RTL}\n\n\\begin{figure}[H]\n\\centering\n\\includegraphics[width=0.4\\textwidth]{./assets/chart.png}\n\\end{figure}\n\n<!-- Random text within the document -->\n\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\\begin{RTL}\nטקסט נוסף בעברית\n\\end{RTL}\n\n<!-- Text in english, in a new page -->\n{{< pagebreak >}}\n## New Section\nNew section in a new page\n\n",
+    "supporting": [
+      "report_files/figure-pdf"
+    ],
+    "filters": []
+  }
+}

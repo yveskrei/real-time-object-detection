@@ -1,0 +1,63 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+__init__.py
+
+# Virtual environment
+env/
+venv/
+ENV/
+.venv/
+.ENV/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# PyTorch model files
+*.pt
+*.pth
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+*.eggs
+*.manifest
+*.spec
+
+# Logs and debugging
+*.log
+*.out
+*.err
+*.pickle
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.old
+
+# Test results
+.coverage
+*.coverage.*
+nosetests.xml
+pytest_cache/
+htmlcov/
+.tox/
+
+# Project-specific
+models/
+triton_models/
+sources/
