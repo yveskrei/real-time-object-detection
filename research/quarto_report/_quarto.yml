@@ -1,0 +1,12 @@
+project:
+  output-dir: output
+format:
+  pdf:
+    documentclass: article
+    pdf-engine: xelatex
+    margin-left: 1.2in
+    margin-right: 1.5in
+    margin-top: 1.5in
+    margin-bottom: 1.2in
+execute:
+    echo: false

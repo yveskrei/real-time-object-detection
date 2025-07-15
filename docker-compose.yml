@@ -1,0 +1,37 @@
+services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver:25.06-py3
+    container_name: triton-server
+    restart: unless-stopped
+
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+
+    volumes:
+      - ./triton_models:/models:ro
+      - ./triton_logs:/logs
+
+    command: >
+      tritonserver
+      --model-repository=/models
+      --allow-http=true
+      --allow-grpc=true
+      --allow-metrics=true
+      --log-verbose=1
+      --log-file=/logs/triton.log
+      --exit-on-error=false
+      --strict-model-config=false
+      --backend-config=python,shm-default-byte-size=1048576
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
