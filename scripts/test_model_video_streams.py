@@ -6,55 +6,84 @@ from tritonclient.utils import np_to_triton_dtype
 import threading
 import GPUtil
 import traceback
+import argparse
+import cv2
+import os
 
 MODEL_FP16 = 'FP16'
 MODEL_FP32 = 'FP32'
 
-# === CONFIG ===
-MODEL_NAME = "yolov9-e-fp16"  # Change as needed
-MODEL_TYPE = MODEL_FP16
-MODEL_VERSION = "1"
-INPUT_NAME = "images"
-MAX_LATENCY_MS = 1000         # Max acceptable average latency
-MAX_GPU_UTIL = 100            # Max GPU usage (%)
-TRITON_URL = "localhost:8001"  # Triton server address
-TARGET_FPS = 25               # FPS for each video stream
-TEST_DURATION_SEC = 2        # How long to run each test
-INFER_EVERY_N_FRAMES = 4     # Perform inference every N frames (set >1 to skip frames)
-
-def generate_input():
+def generate_dummy_input(model_type):
     """Generate a single dummy input (batch size = 1)."""
     rand_input = np.random.rand(1, 3, 640, 640)
 
-    if MODEL_TYPE == MODEL_FP16:
+    if model_type == MODEL_FP16:
         return rand_input.astype(np.float16)
-    elif MODEL_TYPE == MODEL_FP32:
+    elif model_type == MODEL_FP32:
         return rand_input.astype(np.float32)
     else:
-        raise ValueError(f"Unsupported model type: {MODEL_TYPE}. Use 'FP16' or 'FP32'.")
+        raise ValueError(f"Unsupported model type: {model_type}. Use 'FP16' or 'FP32'.")
+
+def load_image_input(image_path, model_type):
+    """
+    Load image from disk, preprocess and return numpy array
+    with shape (1, 3, 640, 640) in model_type float32 or float16.
+    """
+    if not os.path.isfile(image_path):
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+    
+    # Load with OpenCV in BGR
+    img = cv2.imread(image_path)
+    if img is None:
+        raise RuntimeError(f"Failed to load image: {image_path}")
+
+    # Convert BGR to RGB
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # Resize to 640x640 (model input size)
+    img_resized = cv2.resize(img, (640, 640))
+
+    # Normalize to 0-1 float
+    img_norm = img_resized.astype(np.float32) / 255.0
+
+    # Change to CHW format
+    img_chw = np.transpose(img_norm, (2, 0, 1))
+
+    # Add batch dim
+    img_batch = np.expand_dims(img_chw, axis=0)
+
+    if model_type == MODEL_FP16:
+        return img_batch.astype(np.float16)
+    else:
+        return img_batch.astype(np.float32)
 
 def get_gpu_util():
     """Get current GPU utilization percentage."""
     gpus = GPUtil.getGPUs()
     return max((gpu.load * 100 for gpu in gpus), default=0.0)
 
-def infer(client, input_data):
+def infer(client, model_name, model_version, input_name, input_data):
     """Perform inference on the model."""
     inputs = [
-        grpcclient.InferInput(INPUT_NAME, input_data.shape, np_to_triton_dtype(input_data.dtype))
+        grpcclient.InferInput(input_name, input_data.shape, np_to_triton_dtype(input_data.dtype))
     ]
     inputs[0].set_data_from_numpy(input_data)
-    return client.infer(model_name=MODEL_NAME, model_version=MODEL_VERSION, inputs=inputs)
+    return client.infer(model_name=model_name, model_version=model_version, inputs=inputs)
 
 class VideoStreamSimulator:
     """Simulates a video stream sending frames at specified FPS."""
     
-    def __init__(self, stream_id, fps, client, input_data):
+    def __init__(self, stream_id, fps, client, model_name, model_version, input_name, input_data, infer_every_n_frames):
         self.stream_id = stream_id
         self.fps = fps
         self.frame_interval = 1.0 / fps  # seconds between frames
         self.client = client
+        self.model_name = model_name
+        self.model_version = model_version
+        self.input_name = input_name
         self.input_data = input_data
+        self.infer_every_n_frames = infer_every_n_frames
+
         self.latencies = []
         self.frames_got = 0
         self.frames_processed = 0
@@ -67,7 +96,7 @@ class VideoStreamSimulator:
     def start(self):
         """Start the video stream simulation."""
         self.running = True
-        self.thread = threading.Thread(target=self._run_stream)
+        self.thread = threading.Thread(target=self._run_stream, daemon=True)
         self.thread.start()
     
     def stop(self):
@@ -93,18 +122,16 @@ class VideoStreamSimulator:
         """Send a single frame for inference."""
         self.frames_got += 1
 
-        if self.frames_got % INFER_EVERY_N_FRAMES != 0:
+        if self.frames_got % self.infer_every_n_frames != 0:
             return  # Skip inference for this frame
 
         self.frames_processed += 1
         start_time = time.time()
 
         try:
-            infer(self.client, self.input_data)
+            infer(self.client, self.model_name, self.model_version, self.input_name, self.input_data)
 
             with self.lock:
-
-                # Finish latency measurement only when not busy
                 latency_ms = (time.time() - start_time) * 1000
                 self.latencies.append(latency_ms)
 
@@ -116,7 +143,7 @@ class VideoStreamSimulator:
         except Exception as e:
             print(f"Stream {self.stream_id} error: {e}")
 
-    def get_stats(self):
+    def get_stats(self, test_duration_sec):
         """Get statistics for this stream."""
         with self.lock:
             latencies = self.latencies.copy()
@@ -149,24 +176,22 @@ class VideoStreamSimulator:
                 "p99_latency_ms": np.percentile(latencies, 99),
                 "min_latency_ms": np.min(latencies),
                 "max_latency_ms": np.max(latencies),
-                "actual_fps": self.frames_completed / TEST_DURATION_SEC
+                "actual_fps": self.frames_completed / test_duration_sec
             }
 
-def test_video_streams(num_streams):
+def test_video_streams(num_streams, client, model_name, model_version, input_name, input_data, target_fps,
+                       test_duration_sec, infer_every_n_frames):
     """Test with specified number of video streams."""
-    print(f"\n=== Testing {num_streams} video streams at {TARGET_FPS} FPS(Inference for every {INFER_EVERY_N_FRAMES} Frames) ===")
-    
-    client = grpcclient.InferenceServerClient(url=TRITON_URL)
-    input_data = generate_input()
+    print(f"\n=== Testing {num_streams} video streams at {target_fps} FPS (Inference every {infer_every_n_frames} frames) ===")
     
     streams = []
     for i in range(num_streams):
-        stream = VideoStreamSimulator(i, TARGET_FPS, client, input_data)
+        stream = VideoStreamSimulator(i, target_fps, client, model_name, model_version, input_name, input_data, infer_every_n_frames)
         streams.append(stream)
         stream.start()
     
     start_time = time.time()
-    time.sleep(TEST_DURATION_SEC)
+    time.sleep(test_duration_sec)
 
     for stream in streams:
         stream.stop()
@@ -181,7 +206,7 @@ def test_video_streams(num_streams):
     stream_stats = []
 
     for stream in streams:
-        stats = stream.get_stats()
+        stats = stream.get_stats(test_duration_sec)
         stream_stats.append(stats)
 
         with stream.lock:
@@ -203,12 +228,10 @@ def test_video_streams(num_streams):
 
     gpu_util = get_gpu_util()
     
-    # General information for all streams
-    expected_total_fps = num_streams * TARGET_FPS / INFER_EVERY_N_FRAMES
+    expected_total_fps = num_streams * target_fps / infer_every_n_frames
     actual_total_fps = total_frames_completed / total_duration
     fps_completion_rate = (actual_total_fps / expected_total_fps) * 100 if expected_total_fps > 0 else 0
 
-    # Overall frame counts
     frame_process_rate = (total_frames_processed / total_frames_got) * 100 if total_frames_got > 0 else 0
     frame_completion_rate = (total_frames_completed / total_frames_processed) * 100 if total_frames_processed > 0 else 0
     missed_frame_rate = (total_frames_missed / total_frames_processed) * 100 if total_frames_processed > 0 else 0
@@ -226,7 +249,6 @@ def test_video_streams(num_streams):
             "fps_completion_rate": fps_completion_rate,
             "gpu_util_percent": gpu_util,
             
-            # Calculations for frames we processed actually
             "total_frames_got": total_frames_got,
             "total_frames_processed": total_frames_processed,
             "frame_process_rate": frame_process_rate,
@@ -259,40 +281,62 @@ def test_video_streams(num_streams):
 
     return results
 
-def run_full_test(min_streams: int = 1, max_streams: int = 32):
-    """Run the complete video stream throughput test."""
-
+def run_full_test(args):
     print(f"Starting video stream throughput test")
-    print(f"Model: {MODEL_NAME}")
-    print(f"Target FPS per stream: {TARGET_FPS}")
-    print(f"Test duration: {TEST_DURATION_SEC} seconds")
-    print(f"Inference every N frames: {INFER_EVERY_N_FRAMES}")
-    print(f"Min streams to test: {min_streams}")
-    print(f"Max streams to test: {max_streams}")
-    print(f"Frame processing interval: {1 / TARGET_FPS * 1000:.2f} ms")
-    
+    print(f"Model: {args.model_name}")
+    print(f"Model Version: {args.model_version}")
+    print(f"Target FPS per stream: {args.target_fps}")
+    print(f"Test duration: {args.test_duration_sec} seconds")
+    print(f"Inference every N frames: {args.infer_every_n_frames}")
+    print(f"Max latency threshold: {args.max_latency} ms")
+    print(f"Max GPU utilization threshold: {args.max_gpu_util} %")
+    print(f"Triton URL: {args.triton_url}")
+    print(f"Input tensor name: {args.input_name}")
+    print(f"Using image input: {'Yes' if args.input_image else 'No (dummy input)'}")
+    print(f"Frame processing interval: {1 / args.target_fps * 1000:.2f} ms")
+
+    # Create client
+    client = grpcclient.InferenceServerClient(url=args.triton_url)
+
+    # Prepare input data
+    if args.input_image:
+        input_data = load_image_input(args.input_image, args.model_type)
+    else:
+        input_data = generate_dummy_input(args.model_type)
+
     all_results = {
-        "model_name": MODEL_NAME,
-        "model_type": MODEL_TYPE,
-        "fps_per_stream": TARGET_FPS,
-        "test_duration_sec": TEST_DURATION_SEC,
-        "infer_every_n_frames": INFER_EVERY_N_FRAMES,
+        "model_name": args.model_name,
+        "model_type": args.model_type,
+        "fps_per_stream": args.target_fps,
+        "test_duration_sec": args.test_duration_sec,
+        "infer_every_n_frames": args.infer_every_n_frames,
         "streams_stats": []
     }
-    num_streams = min_streams
-    while num_streams <= max_streams:
+    
+    num_streams = args.min_streams
+    while num_streams <= args.max_streams:
         try:
-            results = test_video_streams(num_streams)
+            results = test_video_streams(
+                num_streams,
+                client,
+                args.model_name,
+                args.model_version,
+                args.input_name,
+                input_data,
+                args.target_fps,
+                args.test_duration_sec,
+                args.infer_every_n_frames,
+            )
             all_results["streams_stats"].append(results)
 
             overall_stats = results["overall_stats"]
-            if (overall_stats["avg_latency_ms"] > MAX_LATENCY_MS or 
-                overall_stats["gpu_util_percent"] > MAX_GPU_UTIL):
+            if (overall_stats["avg_latency_ms"] > args.max_latency or 
+                overall_stats["gpu_util_percent"] > args.max_gpu_util):
                 
                 print(f"⚠️ Performance threshold reached at {num_streams} streams.")
                 print(f"   Average latency: {overall_stats['avg_latency_ms']:.2f} ms")
                 print(f"   GPU utilization: {overall_stats['gpu_util_percent']:.1f}%")
-                print(f"   FPS efficiency: {overall_stats['fps_efficiency']:.1f}%")
+                print(f"   FPS efficiency: {overall_stats['fps_completion_rate']:.1f}%")
                 break
 
             num_streams += 1
@@ -302,11 +346,32 @@ def run_full_test(min_streams: int = 1, max_streams: int = 32):
             traceback.print_exc()
             break
 
-    out_file = f"{MODEL_NAME}_video_stream_results.json"
+    out_file = f"{args.model_name}_video_stream_results.json"
     with open(out_file, "w") as f:
         json.dump(all_results, f, indent=4)
     
     print(f"\n✅ Results saved to {out_file}")
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Triton video stream throughput testing")
+
+    parser.add_argument("--model_name", type=str, required=True, help="Triton model name")
+    parser.add_argument("--model_version", type=str, default="1", help="Triton model version (default: 1)")
+    parser.add_argument("--input_name", type=str, default="images", help="Model input tensor name (default: images)")
+    parser.add_argument("--max_latency", type=int, default=1000, help="Max acceptable average latency in ms (default: 1000)")
+    parser.add_argument("--max_gpu_util", type=int, default=100, help="Max GPU utilization percent (default: 100)")
+    parser.add_argument("--triton_url", type=str, default="localhost:8001", help="Triton server URL (default: localhost:8001)")
+    parser.add_argument("--target_fps", type=int, default=30, help="Target FPS for each video stream (default: 30)")
+    parser.add_argument("--test_duration_sec", type=int, default=30, help="Duration of test per stream count in seconds (default: 30)")
+    parser.add_argument("--infer_every_n_frames", type=int, default=1, help="Perform inference every N frames (default: 1)")
+    parser.add_argument("--input_image", type=str, default=None, help="Optional path to input image to replace dummy input")
+    parser.add_argument("--model_type", type=str, choices=[MODEL_FP16, MODEL_FP32], default=MODEL_FP16, help="Model precision type (FP16 or FP32)")
+
+    parser.add_argument("--min_streams", type=int, default=1, help="Minimum number of streams to test (default: 1)")
+    parser.add_argument("--max_streams", type=int, default=32, help="Maximum number of streams to test (default: 32)")
+
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    run_full_test()
+    args = parse_args()
+    run_full_test(args)
