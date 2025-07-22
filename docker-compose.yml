@@ -6,6 +6,7 @@ services:
 
     runtime: nvidia
     environment:
+      - MODEL_CONTROL_MODE=explicit
       - NVIDIA_VISIBLE_DEVICES=all
 
     ports:
@@ -14,12 +15,13 @@ services:
       - "8002:8002"
 
     volumes:
-      - ./triton_models:/models:ro
+      - ./triton_models:/models:rw
       - ./triton_logs:/logs
 
     command: >
       tritonserver
       --model-repository=/models
+      --model-control-mode=explicit
       --allow-http=true
       --allow-grpc=true
       --allow-metrics=true
