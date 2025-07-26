@@ -21,12 +21,9 @@ def export_model(model_path: str, input_name: str = "images", output_name: str =
             self.model = model
 
         def forward(self, x):
-            output = self.model(x)[0]
-
-            if isinstance(output, (list, tuple)):
-                return output[0]
-            else:
-                return output
+            output = self.model(x)
+            
+            return output[0][0]
 
     model = WrapperModel(model).to(device)
 
