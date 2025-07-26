@@ -6,4 +6,4 @@ onnxruntime-gpu==1.22.0
 GPUtil==1.4.0
 tritonclient[grpc]==2.59.0
 nvidia-ml-py==12.575.51
-numpy==2.3.1
+numpy==2.2.6

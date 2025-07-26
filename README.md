@@ -39,6 +39,32 @@ trtexec \
   --exportTimes=inference_times.json
 ```
 
+## Extras - Nvidia DeepStream
+To run nvidia deepstream, we need to have the docker image configured. We are using `nvcr.io/nvidia/deepstream:7.1-gc-triton-devel`.
+Run the following commands inside of the entry point of the image:
+```
+# Update package repository
+apt-get update -y
+
+# Premade DeepStream scripts
+./install.sh
+./user_additional_install.sh
+
+# Decoding/Audio packages that need to be installed
+apt install -y \
+    libflac8 \
+    libfaad2 \
+    libopenh264-6 \
+    libvo-aacenc0 \
+    libmjpegtools-dev \
+    mjpegtools
+
+apt install -y \
+    ubuntu-restricted-extras \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav
+```
+
 We convert the model to TensorRT with the binary found inside of the docker image, in order to ensure compatibility with the host system. Used versions:
 - Latest image: `nvcr.io/nvidia/tritonserver:25.06-py3`
 - Previous image: `nvcr.io/nvidia/tritonserver:23.08-py3`
