@@ -1,3 +1,8 @@
+// Custom modules
+use client::config::{Config, Environment};
+
 fn main() {
-    println!("Hello, world!");
+    // Iniaitlize config
+    let app_config = Config::new(true, Environment::Production).expect("Error loading config");
+
 }
