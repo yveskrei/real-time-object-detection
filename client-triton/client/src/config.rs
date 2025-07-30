@@ -4,6 +4,7 @@ use std::io::Error;
 use std::env;
 use std::process::Command;
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Environment {
     Production,
     NonProduction
@@ -22,8 +23,8 @@ impl Config {
             // Load variables from local env file
             let base_dir = Path::new(file!()).parent().unwrap();
             let env_file = match environment {
-                Environment::Production => ".env",
-                Environment::NonProduction => ".env"
+                Environment::Production => ".env_test",
+                Environment::NonProduction => ".env_test"
             };
 
             let env_path = base_dir.join(format!("../secrets/{}", env_file)).canonicalize().unwrap();

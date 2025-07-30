@@ -194,6 +194,8 @@ version = "0.1.0"
 dependencies = [
  "dotenvy",
  "half",
+ "serde_json",
+ "tokio",
  "triton-client",
 ]
 

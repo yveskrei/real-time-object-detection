@@ -142,7 +142,7 @@ def main(args):
 def parse_args():
     import argparse
     parser = argparse.ArgumentParser(description='DeepStream YOLOv9 conversion')
-    parser.add_argument('--model_path', required=True, help='Input model (.pt) file path (required)')
+    parser.add_argument('--model-path', required=True, help='Input model (.pt) file path (required)')
     parser.add_argument('--size', nargs='+', type=int, default=[640], help='Inference size [H,W] (default [640])')
     parser.add_argument('--dynamic', action='store_true', help='Dynamic batch-size')
     parser.add_argument('--batch', type=int, default=1, help='Static batch-size')

@@ -10,6 +10,7 @@ venv/
 ENV/
 .venv/
 .ENV/
+*.env
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
@@ -59,6 +60,11 @@ htmlcov/
 
 # Project-specific
 models/
-triton_models/
 sources/
-client/t
+.cargo/
+
+# Client Triton
+client-triton/triton_logs/
+client-triton/triton_models/
+client-triton/client/target/
+client-triton/client/Cargo.lock

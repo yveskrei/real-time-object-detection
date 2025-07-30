@@ -1,17 +1,20 @@
-use std::io::{Error, ErrorKind};
 use triton_client::Client;
-use triton_client::inference::{ModelInferRequest, InferTensorContents};
+use triton_client::inference::{ModelInferRequest, InferTensorContents, RepositoryModelLoadRequest, ModelRepositoryParameter};
 use triton_client::inference::model_infer_request::{InferInputTensor, InferRequestedOutputTensor};
+use triton_client::inference::model_repository_parameter::{ParameterChoice};
 use std::collections::HashMap;
+
+use std::io::{Error, ErrorKind};
 use half::f16;
+use serde_json::json;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Precision {
+pub enum Precision {
     FP32,
     FP16
 }
 
-struct Inference {
+pub struct InferenceModel {
     triton: Client,
     model_name: String,
     model_version: String,
@@ -20,7 +23,7 @@ struct Inference {
     precision: Precision
 }
 
-impl Inference {
+impl InferenceModel {
     pub async fn new(
         model_name: String, 
         model_version: String, 
@@ -29,22 +32,21 @@ impl Inference {
         precision: Precision
     ) -> Result<Self, Error> {
         //Create client instance
-        let client = Client::new("http://localhost:8001/", None).await
+        let triton = Client::new("http://localhost:8001/", None).await
         .map_err(|e| Error::new(ErrorKind::ConnectionRefused, e))?;
 
         // Check if server is ready
-        let server_ready = client.server_ready().await
+        let server_ready = triton.server_ready().await
         .map_err(|e| Error::new(ErrorKind::ConnectionRefused, e))?;
 
         if !server_ready.ready {
-            return Err(Error::new(ErrorKind::Other, "Triton server is not ready"));
+            return Err(Error::new(ErrorKind::ConnectionRefused, "Triton server is not ready"));
         }
 
-        // Load triton model
-        // TODO
+        println!("Triton Server is ready!");
 
         Ok(Self { 
-            triton: client,
+            triton,
             model_name,
             model_version,
             input_name,
@@ -53,12 +55,91 @@ impl Inference {
         })
     }
 
+    pub async fn load_model(&self, instances: i32) -> Result<(), Error> {
+        let precision_name = match self.precision {
+            Precision::FP32 => "FP32",
+            Precision::FP16 => "FP16"
+        };
+
+        let model_config = json!({
+            "name": self.model_name,
+            "platform": "tensorrt_plan",
+            "max_batch_size": 16,
+            "input": [
+                {
+                    "name": self.input_name,
+                    "data_type": format!("TYPE_{}", precision_name),
+                    "dims": [3, 640, 640]
+                }
+            ],
+            "output": [
+                {
+                    "name": self.output_name,
+                    "data_type": format!("TYPE_{}", precision_name),
+                    "dims": [84, 8400]
+                }
+            ],
+            "instance_group": [
+                {
+                    "kind": "KIND_GPU",
+                    "count": instances,
+                    "gpus": [0]
+                }
+            ],
+            "dynamic_batching": {
+                "max_queue_delay_microseconds": 1000,
+                "preferred_batch_size": [2, 4, 8, 12, 16]
+            },
+            "optimization": {
+                "execution_accelerators": {
+                "gpu_execution_accelerator": [
+                    {
+                        "name": "tensorrt",
+                        "parameters": {
+                            "key": "precision_mode",
+                            "value": precision_name
+                        }
+                    }
+                ]
+                },
+                "input_pinned_memory": {
+                    "enable": true
+                },
+                "output_pinned_memory": {
+                    "enable": true
+                }
+            },
+            "model_transaction_policy": {
+                "decoupled": false
+            }
+        });
+
+        // Define model config
+        let mut parameters = HashMap::new();
+        parameters.insert("config".to_string(), ModelRepositoryParameter{ 
+            parameter_choice: Some(ParameterChoice::StringParam(model_config.to_string()))
+        });
+
+        // Load selected model
+        self.triton.repository_model_load(RepositoryModelLoadRequest { 
+            repository_name: "".to_string(), 
+            model_name: self.model_name.clone(), 
+            parameters: parameters
+        }).await
+        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+
+        println!("Model {} is ready for inference!", self.model_name);
+
+        Ok(())
+    }
+
     pub async fn infer(&self, image: &[f32]) -> Result<(), Error> {
         // Define input/output precision
         let precision_name = match self.precision {
             Precision::FP32 => "FP32",
             Precision::FP16 => "FP16"
         };
+        let image_bytes = InferenceModel::get_image_bytes(image, self.precision);
 
         let inference_request = ModelInferRequest {
             model_name: self.model_name.clone(),
@@ -79,7 +160,7 @@ impl Inference {
                         uint64_contents: vec![],
                         fp32_contents: vec![], // Always empty when using bytes
                         fp64_contents: vec![],
-                        bytes_contents: vec![Inference::get_image_bytes(image, self.precision)],
+                        bytes_contents: vec![image_bytes],
                     })
                 }
             ],
@@ -135,5 +216,5 @@ impl Inference {
                 bytes
             }
         }
-}
+    }
 }
