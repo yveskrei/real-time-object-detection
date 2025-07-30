@@ -19,9 +19,9 @@ done
 ## Extras - TensorRT conversion
 TensorRT is a tool used to enhance capabilities of a given model. Works best with ONNX models.<br>
 It compiles a model for your specific achitecture(one used at time of compilation).<br>
-The following command is used for converting a model(with support of batch inference):
+The following command is used for converting a model(with support of batch inference)(best to do on triton docker image itself for full TRT compatibility):
 ```bash
-trtexec \
+/usr/src/tensorrt/bin/trtexec \
   --onnx=MODEL.onnx \
   --saveEngine=CONVERTED.engine \
   --optShapes=images:16x3x640x640 \
@@ -33,36 +33,10 @@ trtexec \
 
 To test performance of TRT model, use the following command:
 ```bash
-trtexec \
+/usr/src/tensorrt/bin/trtexec \
   --loadEngine=CONVERTED.engine \
   --shapes=images:4x3x640x640 \
   --exportTimes=inference_times.json
-```
-
-## Extras - Nvidia DeepStream
-To run nvidia deepstream, we need to have the docker image configured. We are using `nvcr.io/nvidia/deepstream:7.1-gc-triton-devel`.
-Run the following commands inside of the entry point of the image:
-```
-# Update package repository
-apt-get update -y
-
-# Premade DeepStream scripts
-./install.sh
-./user_additional_install.sh
-
-# Decoding/Audio packages that need to be installed
-apt install -y \
-    libflac8 \
-    libfaad2 \
-    libopenh264-6 \
-    libvo-aacenc0 \
-    libmjpegtools-dev \
-    mjpegtools
-
-apt install -y \
-    ubuntu-restricted-extras \
-    gstreamer1.0-plugins-ugly \
-    gstreamer1.0-libav
 ```
 
 We convert the model to TensorRT with the binary found inside of the docker image, in order to ensure compatibility with the host system. Used versions:

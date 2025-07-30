@@ -6,7 +6,7 @@ from onnxconverter_common import float16
 import onnx
 import os
 
-def export_model(model_path: str, input_name: str = "images", output_name: str = "output", device: str = "cuda") -> str:
+def export_model(model_path: str, output_path: str, input_name: str = "images", output_name: str = "output", device: str = "cuda") -> str:
     """
         Exports PT model to onnx, both FP32 and FP16 precisions
     """
@@ -22,7 +22,7 @@ def export_model(model_path: str, input_name: str = "images", output_name: str =
 
         def forward(self, x):
             output = self.model(x)
-            
+
             return output[0][0]
 
     model = WrapperModel(model).to(device)
@@ -30,10 +30,13 @@ def export_model(model_path: str, input_name: str = "images", output_name: str =
     # Dummy input
     dummy_input = torch.randn(1, 3, 640, 640).to(device)
 
+    # Create output directory if doesn't exist
+    os.makedirs(output_path, exist_ok=True)
+
     # Define output paths
     model_name = Path(model_path).stem
-    path_fp32 = os.path.join(os.getcwd(), f"{model_name}-fp32.onnx")
-    path_fp16 = os.path.join(os.getcwd(), f"{model_name}-fp16.onnx")
+    path_fp32 = os.path.join(output_path, f"{model_name}-fp32.onnx")
+    path_fp16 = os.path.join(output_path, f"{model_name}-fp16.onnx")
 
     # Export to ONNX - FP32
     torch.onnx.export(
@@ -61,9 +64,10 @@ def export_model(model_path: str, input_name: str = "images", output_name: str =
     print(f"Exported F16 model to: {path_fp16}")
 def main():
     parser = argparse.ArgumentParser(description='Export YOLOv9 model to ONNX and test inference.')
-    parser.add_argument('--model-path', required=True, help='Path to the .pt PyTorch model')
-    parser.add_argument('--input-name', default='images', help='Name of the ONNX model input')
-    parser.add_argument('--output-name', default='output', help='Name of the ONNX model output')
+    parser.add_argument('--model-path', type=str, required=True, help='Path to the .pt PyTorch model')
+    parser.add_argument('--output-path', type=str, default=os.getcwd(), help='Output directory for .onnx models')
+    parser.add_argument('--input-name', type=str, default='images', help='Name of the ONNX model input')
+    parser.add_argument('--output-name', type=str, default='output', help='Name of the ONNX model output')
     args = parser.parse_args()
 
     # Auto device detection
@@ -72,6 +76,7 @@ def main():
 
     export_model(
         args.model_path,
+        args.output_path,
         args.input_name, 
         args.output_name, 
         device
