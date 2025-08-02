@@ -5,7 +5,11 @@ edition = "2024"
 
 [dependencies]
 dotenvy = "0.15"
-triton-client = "0.2.0"
-half = "2.6.0"
 tokio = "1.47.0"
 serde_json = "1.0.141"
+image = "0.25.6"
+triton-client = "0.2.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter", "time"] }
+half = "2.6.0"
+rayon = "1.10.0"

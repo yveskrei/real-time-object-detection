@@ -1,6 +1,6 @@
-name: "yolov9-e-fp16"
+name: "yolov9"
 platform: "tensorrt_plan"
-max_batch_size: 32  # adjust to your expected batch size limits
+max_batch_size: 16  # adjust to your expected batch size limits
 
 input [
   {
@@ -28,7 +28,7 @@ instance_group [
 
 dynamic_batching {
   max_queue_delay_microseconds: 500 # (tune between 100-1000)
-  preferred_batch_size: [16, 32]  # triton will try to pad to these sizes
+  preferred_batch_size: [2, 4, 8, 12, 16]  # triton will try to pad to these sizes
 }
 
 optimization {
@@ -52,3 +52,20 @@ optimization {
 model_transaction_policy {
   decoupled: false
 }
+
+model_warmup [
+  {
+    name: "warmup_random"
+    batch_size: 10
+    inputs [
+      {
+        key: "images"
+        value: {
+          dims: [3, 640, 640]
+          data_type: TYPE_FP16
+          random_data: true
+        }
+      }
+    ]
+  }
+]
