@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .unwrap();
 
-    let post_processing_time = inference_start.elapsed() - inference_time;
+    let post_processing_time = inference_start.elapsed() - inference_time - pre_processing_time;
     let total_time = inference_start.elapsed();
 
     tracing::info!(

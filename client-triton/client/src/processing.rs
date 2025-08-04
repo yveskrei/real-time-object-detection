@@ -1,15 +1,277 @@
 use std::io::{Error, ErrorKind};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use half::f16;
 
 // Custom modules
 use crate::inference::{InferencePrecision, InferenceResult};
 
-thread_local! {
-    static OUTPUT_BUFFER_U16: RefCell<Vec<u16>> = RefCell::new(Vec::with_capacity(640 * 640 * 3));
-    static OUTPUT_BUFFER_F32: RefCell<Vec<f32>> = RefCell::new(Vec::with_capacity(640 * 640 * 3));
-    static MAPPING_CACHE: RefCell<HashMap<(usize, usize), FastMapping>> = RefCell::new(HashMap::new());
+// Fast f16 to f32 conversion using bit manipulation
+fn f16_to_f32(f16_val: u16) -> f32 {
+    let sign = (f16_val >> 15) & 0x1;
+    let exp = (f16_val >> 10) & 0x1f;
+    let frac = f16_val & 0x3ff;
+    
+    if exp == 0 {
+        if frac == 0 {
+            return if sign == 1 { -0.0 } else { 0.0 };
+        }
+        // Denormal
+        let mut val = frac as f32 / 1024.0 / 16384.0;
+        if sign == 1 { val = -val; }
+        return val;
+    } else if exp == 31 {
+        // Infinity or NaN
+        return if frac == 0 {
+            if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
+        } else {
+            f32::NAN
+        };
+    }
+    
+    // Normal numbers
+    let exp_f32 = (exp as i32 - 15 + 127) as u32;
+    let frac_f32 = (frac as u32) << 13;
+    let bits = (sign as u32) << 31 | exp_f32 << 23 | frac_f32;
+    f32::from_bits(bits)
+}
+
+fn calculate_letterbox_params(height: usize, width: usize) -> (usize, usize, f32, f32, f32) {
+    const TARGET_SIZE: f32 = 640.0;
+    let scale = (TARGET_SIZE / width as f32).min(TARGET_SIZE / height as f32);
+    let new_width = (width as f32 * scale) as usize;
+    let new_height = (height as f32 * scale) as usize;
+    let pad_x = (TARGET_SIZE as usize - new_width) as f32 * 0.5;
+    let pad_y = (TARGET_SIZE as usize - new_height) as f32 * 0.5;
+    (new_width, new_height, pad_x, pad_y, 1.0 / scale)
+}
+
+fn bbox_nms(mut detections: Vec<InferenceResult>, nms_iou_threshold: f32) -> Vec<InferenceResult> {
+    let len = detections.len();
+    if len <= 1 {
+        return detections;
+    }
+    
+    // Sort by score descending - unstable for speed
+    detections.sort_unstable_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    
+    let mut keep = Vec::with_capacity(len);
+    let mut suppressed = vec![false; len];
+    
+    for i in 0..len {
+        if unsafe { *suppressed.get_unchecked(i) } {
+            continue;
+        }
+        
+        let detection_i = unsafe { *detections.get_unchecked(i) };
+        keep.push(detection_i);
+        
+        let bbox1 = &detection_i.bbox;
+        let class1 = detection_i.class;
+        
+        // Pre-calculate bbox1 area
+        let bbox1_area = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1]);
+        
+        // Check remaining detections of same class only
+        for j in (i + 1)..len {
+            if unsafe { *suppressed.get_unchecked(j) } {
+                continue;
+            }
+            
+            let detection_j = unsafe { detections.get_unchecked(j) };
+            
+            if class1 != detection_j.class {
+                continue;
+            }
+            
+            let bbox2 = &detection_j.bbox;
+            
+            // Inline IoU calculation for speed
+            let x1_max = bbox1[0].max(bbox2[0]);
+            let y1_max = bbox1[1].max(bbox2[1]);
+            let x2_min = bbox1[2].min(bbox2[2]);
+            let y2_min = bbox1[3].min(bbox2[3]);
+            
+            let intersection_width = x2_min - x1_max;
+            let intersection_height = y2_min - y1_max;
+            
+            if intersection_width > 0.0 && intersection_height > 0.0 {
+                let intersection_area = intersection_width * intersection_height;
+                let bbox2_area = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1]);
+                let union_area = bbox1_area + bbox2_area - intersection_area;
+                let iou = intersection_area / union_area;
+                
+                if iou > nms_iou_threshold {
+                    unsafe { *suppressed.get_unchecked_mut(j) = true; }
+                }
+            }
+        }
+    }
+    
+    keep
+}
+
+pub fn postprocess_yolo(
+    results: &[u8],
+    image_height: usize,
+    image_width: usize,
+    output_shape: &[i64; 2],
+    precision: InferencePrecision,
+    pred_conf_threshold: f32,
+    nms_iou_threshold: f32,
+) -> Result<Vec<InferenceResult>, Error> {
+    let target_features = output_shape[0] as usize;
+    let target_anchors = output_shape[1] as usize;
+    let target_classes = target_features - 4;
+    
+    // Validate input size
+    let expected_size = match precision {
+        InferencePrecision::FP16 => target_anchors * target_features * 2,
+        InferencePrecision::FP32 => target_anchors * target_features * 4,
+    };
+    
+    if results.len() != expected_size {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!(
+                "Got unexpected size of model output ({}). Got {}, expected {}",
+                precision.to_string(),
+                results.len(),
+                expected_size
+            ),
+        ));
+    }
+    
+    // Calculate letterbox parameters once
+    let (_, _, pad_x, pad_y, inv_scale) = calculate_letterbox_params(image_height, image_width);
+    
+    let mut detections = Vec::with_capacity(target_anchors.min(1000)); // Cap initial capacity
+    
+    match precision {
+        InferencePrecision::FP16 => {
+            // Cast to u16 slice for f16 data
+            let u16_data = unsafe {
+                std::slice::from_raw_parts(results.as_ptr() as *const u16, results.len() / 2)
+            };
+            
+            // Process all anchors in single loop
+            for anchor_idx in 0..target_anchors {
+                // Calculate indices for transposed access pattern
+                let x_idx = anchor_idx;
+                let y_idx = target_anchors + anchor_idx;
+                let w_idx = 2 * target_anchors + anchor_idx;
+                let h_idx = 3 * target_anchors + anchor_idx;
+                
+                if h_idx >= u16_data.len() {
+                    break;
+                }
+                
+                unsafe {
+                    // Convert f16 to f32 using fast bit manipulation
+                    let x = f16_to_f32(*u16_data.get_unchecked(x_idx));
+                    let y = f16_to_f32(*u16_data.get_unchecked(y_idx));
+                    let w = f16_to_f32(*u16_data.get_unchecked(w_idx));
+                    let h = f16_to_f32(*u16_data.get_unchecked(h_idx));
+                    
+                    // Convert center coordinates to corners and scale back
+                    let half_w = w * 0.5;
+                    let half_h = h * 0.5;
+                    let final_x1 = (x - half_w - pad_x) * inv_scale;
+                    let final_y1 = (y - half_h - pad_y) * inv_scale;
+                    let final_x2 = (x + half_w - pad_x) * inv_scale;
+                    let final_y2 = (y + half_h - pad_y) * inv_scale;
+                    
+                    // Find max class score - unrolled for small class counts
+                    let mut max_score = 0.0f32;
+                    let mut max_class = 0usize;
+                    
+                    let class_start_idx = 4 * target_anchors + anchor_idx;
+                    for class_idx in 0..target_classes {
+                        let prob_idx = class_start_idx + class_idx * target_anchors;
+                        if prob_idx < u16_data.len() {
+                            let score = f16_to_f32(*u16_data.get_unchecked(prob_idx));
+                            if score > max_score {
+                                max_score = score;
+                                max_class = class_idx;
+                            }
+                        }
+                    }
+                    
+                    // Early confidence filtering
+                    if max_score >= pred_conf_threshold {
+                        detections.push(InferenceResult {
+                            bbox: [final_x1, final_y1, final_x2, final_y2],
+                            class: max_class,
+                            score: max_score,
+                        });
+                    }
+                }
+            }
+        }
+        InferencePrecision::FP32 => {
+            // Cast to f32 slice
+            let f32_data = unsafe {
+                std::slice::from_raw_parts(results.as_ptr() as *const f32, results.len() / 4)
+            };
+            
+            // Process all anchors in single loop
+            for anchor_idx in 0..target_anchors {
+                // Calculate indices for transposed access pattern
+                let x_idx = anchor_idx;
+                let y_idx = target_anchors + anchor_idx;
+                let w_idx = 2 * target_anchors + anchor_idx;
+                let h_idx = 3 * target_anchors + anchor_idx;
+                
+                if h_idx >= f32_data.len() {
+                    break;
+                }
+                
+                unsafe {
+                    let x = *f32_data.get_unchecked(x_idx);
+                    let y = *f32_data.get_unchecked(y_idx);
+                    let w = *f32_data.get_unchecked(w_idx);
+                    let h = *f32_data.get_unchecked(h_idx);
+                    
+                    // Convert center coordinates to corners and scale back
+                    let half_w = w * 0.5;
+                    let half_h = h * 0.5;
+                    let final_x1 = (x - half_w - pad_x) * inv_scale;
+                    let final_y1 = (y - half_h - pad_y) * inv_scale;
+                    let final_x2 = (x + half_w - pad_x) * inv_scale;
+                    let final_y2 = (y + half_h - pad_y) * inv_scale;
+                    
+                    // Find max class score
+                    let mut max_score = 0.0f32;
+                    let mut max_class = 0usize;
+                    
+                    let class_start_idx = 4 * target_anchors + anchor_idx;
+                    for class_idx in 0..target_classes {
+                        let prob_idx = class_start_idx + class_idx * target_anchors;
+                        if prob_idx < f32_data.len() {
+                            let score = *f32_data.get_unchecked(prob_idx);
+                            if score > max_score {
+                                max_score = score;
+                                max_class = class_idx;
+                            }
+                        }
+                    }
+                    
+                    // Early confidence filtering
+                    if max_score >= pred_conf_threshold {
+                        detections.push(InferenceResult {
+                            bbox: [final_x1, final_y1, final_x2, final_y2],
+                            class: max_class,
+                            score: max_score,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    
+    // Perform NMS only if we have detections
+    if !detections.is_empty() {
+        detections = bbox_nms(detections, nms_iou_threshold);
+    }
+    
+    Ok(detections)
 }
 
 // Pre-computed lookup tables
@@ -50,516 +312,156 @@ static F32_LUT: [f32; 256] = {
     lut
 };
 
-// Enhanced mapping cache with bilinear interpolation support
-#[derive(Clone)]
-struct FastMapping {
-    y_indices: Vec<usize>,
-    x_indices: Vec<usize>,
-    row_offsets: Vec<usize>,
-}
-
-fn calculate_letterbox_params(height: usize, width: usize) -> (usize, usize, usize, usize, f32) {
-    const TARGET_SIZE: usize = 640;
-    let scale = (TARGET_SIZE as f32 / width as f32).min(TARGET_SIZE as f32 / height as f32);
-    let new_width = (width as f32 * scale) as usize;
-    let new_height = (height as f32 * scale) as usize;
-    let pad_x = (TARGET_SIZE - new_width) / 2;
-    let pad_y = (TARGET_SIZE - new_height) / 2;
-    (new_width, new_height, pad_x, pad_y, 1.0 / scale)
-}
-
-fn generate_fast_mapping(height: usize, width: usize, new_height: usize, new_width: usize, inv_scale: f32) -> FastMapping {
+pub fn preprocess_yolo(
+    image: &[u8],
+    image_height: usize,
+    image_width: usize,
+    input_shape: &[i64; 3],
+    precision: InferencePrecision,
+) -> Result<Vec<u8>, Error> {
+    let target_size: usize = input_shape[1] as usize;
+    let target_pixels = target_size * target_size;
+    
+    // Calculate letterbox params
+    let (new_width, new_height, pad_x, pad_y, inv_scale) = calculate_letterbox_params(image_height, image_width);
+    let pad_x = pad_x as usize;
+    let pad_y = pad_y as usize;
+    
+    // Pre-compute mappings - ONCE
     let mut y_indices = Vec::with_capacity(new_height);
     let mut x_indices = Vec::with_capacity(new_width);
     let mut row_offsets = Vec::with_capacity(new_height);
     
     for y in 0..new_height {
-        let orig_y = ((y as f32 * inv_scale) as usize).min(height - 1);
+        let orig_y = ((y as f32 * inv_scale) as usize).min(image_height - 1);
         y_indices.push(orig_y);
-        row_offsets.push(orig_y * width);
+        row_offsets.push(orig_y * image_width);
     }
     
     for x in 0..new_width {
-        x_indices.push(((x as f32 * inv_scale) as usize).min(width - 1));
+        x_indices.push(((x as f32 * inv_scale) as usize).min(image_width - 1));
     }
     
-    FastMapping { y_indices, x_indices, row_offsets }
-}
-
-fn preprocess_yolo_fp16(    
-    image: &[u8], 
-    image_height: usize, 
-    image_width: usize, 
-    target_size: usize, 
-    target_pixels: usize
-) -> Result<Vec<u8>, Error> {  
-    let (new_width, new_height, pad_x, pad_y, inv_scale) = calculate_letterbox_params(image_height, image_width);
-    
-    OUTPUT_BUFFER_U16.with(|buffer_cell| {
-        MAPPING_CACHE.with(|cache_cell| {
-            let mut buffer = buffer_cell.borrow_mut();
-            let mut cache = cache_cell.borrow_mut();
-            
-            // Pre-allocate and clear buffer
-            if buffer.capacity() < target_pixels * 3 {
-                buffer.reserve(target_pixels * 3);
-            }
-            buffer.clear();
-            buffer.resize(target_pixels * 3, F16_LUT[114]);
-            
-            // Get or create cached mapping
-            let cache_key = (image_height, image_width);
-            let mapping = cache.entry(cache_key).or_insert_with(|| {
-                generate_fast_mapping(image_height, image_width, new_height, new_width, inv_scale)
-            });
-            
-            // Split into planes for better cache locality
-            let buffer_ptr = buffer.as_mut_ptr();
+    match precision {
+        InferencePrecision::FP16 => {
+            // Single allocation with gray padding
+            let mut output: Vec<u16> = vec![F16_LUT[114]; target_pixels * 3];
+            let output_ptr = output.as_mut_ptr();
             
             unsafe {
                 let img_ptr = image.as_ptr();
                 let lut_ptr = F16_LUT.as_ptr();
                 
-                // Process in chunks for better instruction-level parallelism
+                // SINGLE THREADED - no overhead, maximum speed
                 for y in 0..new_height {
                     let target_y = y + pad_y;
-                    let orig_row_base = *mapping.row_offsets.get_unchecked(y);
+                    let orig_row_base = *row_offsets.get_unchecked(y);
                     let target_row_base = target_y * target_size + pad_x;
                     
-                    // Process 8 pixels at once for maximum throughput
+                    // 8-pixel unrolling for ILP
                     let mut x = 0;
                     while x + 7 < new_width {
-                        // Unroll 8 pixels for maximum ILP
                         for i in 0..8 {
                             let target_idx = target_row_base + x + i;
-                            let orig_idx = (orig_row_base + *mapping.x_indices.get_unchecked(x + i)) * 3;
+                            let orig_idx = (orig_row_base + *x_indices.get_unchecked(x + i)) * 3;
                             
                             let r = *img_ptr.add(orig_idx) as usize;
                             let g = *img_ptr.add(orig_idx + 1) as usize;
                             let b = *img_ptr.add(orig_idx + 2) as usize;
                             
-                            // Direct pointer arithmetic for maximum speed
-                            *buffer_ptr.add(target_idx) = *lut_ptr.add(r);
-                            *buffer_ptr.add(target_idx + target_pixels) = *lut_ptr.add(g);
-                            *buffer_ptr.add(target_idx + target_pixels * 2) = *lut_ptr.add(b);
+                            // CHW format
+                            *output_ptr.add(target_idx) = *lut_ptr.add(r);
+                            *output_ptr.add(target_idx + target_pixels) = *lut_ptr.add(g);
+                            *output_ptr.add(target_idx + target_pixels * 2) = *lut_ptr.add(b);
                         }
                         x += 8;
                     }
                     
-                    // Handle remaining pixels
+                    // Remaining pixels
                     while x < new_width {
                         let target_idx = target_row_base + x;
-                        let orig_idx = (orig_row_base + *mapping.x_indices.get_unchecked(x)) * 3;
+                        let orig_idx = (orig_row_base + *x_indices.get_unchecked(x)) * 3;
                         
                         let r = *img_ptr.add(orig_idx) as usize;
                         let g = *img_ptr.add(orig_idx + 1) as usize;
                         let b = *img_ptr.add(orig_idx + 2) as usize;
                         
-                        *buffer_ptr.add(target_idx) = *lut_ptr.add(r);
-                        *buffer_ptr.add(target_idx + target_pixels) = *lut_ptr.add(g);
-                        *buffer_ptr.add(target_idx + target_pixels * 2) = *lut_ptr.add(b);
+                        *output_ptr.add(target_idx) = *lut_ptr.add(r);
+                        *output_ptr.add(target_idx + target_pixels) = *lut_ptr.add(g);
+                        *output_ptr.add(target_idx + target_pixels * 2) = *lut_ptr.add(b);
                         
                         x += 1;
                     }
                 }
             }
             
-            // Safe conversion to bytes
+            // Zero-copy conversion
             Ok(unsafe {
                 std::slice::from_raw_parts(
-                    buffer.as_ptr() as *const u8,
-                    buffer.len() * 2
+                    output.as_ptr() as *const u8,
+                    output.len() * 2
                 ).to_vec()
             })
-        })
-    })
-}
-
-fn preprocess_yolo_fp32(
-    image: &[u8], 
-    image_height: usize, 
-    image_width: usize, 
-    target_size: usize, 
-    target_pixels: usize
-) -> Result<Vec<u8>, Error> {    
-    let (new_width, new_height, pad_x, pad_y, inv_scale) = calculate_letterbox_params(image_height, image_width);
-    
-    OUTPUT_BUFFER_F32.with(|buffer_cell| {
-        MAPPING_CACHE.with(|cache_cell| {
-            let mut buffer = buffer_cell.borrow_mut();
-            let mut cache = cache_cell.borrow_mut();
-            
-            // Pre-allocate and clear buffer
-            if buffer.capacity() < target_pixels * 3 {
-                buffer.reserve(target_pixels * 3);
-            }
-            buffer.clear();
-            buffer.resize(target_pixels * 3, F32_LUT[114]);
-            
-            // Get or create cached mapping
-            let cache_key = (image_height, image_width);
-            let mapping = cache.entry(cache_key).or_insert_with(|| {
-                generate_fast_mapping(image_height, image_width, new_height, new_width, inv_scale)
-            });
-            
-            let buffer_ptr = buffer.as_mut_ptr();
+        }
+        InferencePrecision::FP32 => {
+            // Single allocation with gray padding
+            let mut output: Vec<f32> = vec![F32_LUT[114]; target_pixels * 3];
+            let output_ptr = output.as_mut_ptr();
             
             unsafe {
                 let img_ptr = image.as_ptr();
                 let lut_ptr = F32_LUT.as_ptr();
                 
-                // Process with maximum unrolling for FP32
+                // SINGLE THREADED - maximum speed
                 for y in 0..new_height {
                     let target_y = y + pad_y;
-                    let orig_row_base = *mapping.row_offsets.get_unchecked(y);
+                    let orig_row_base = *row_offsets.get_unchecked(y);
                     let target_row_base = target_y * target_size + pad_x;
                     
-                    // Process 4 pixels at once (optimal for f32 SIMD)
+                    // 8-pixel unrolling
                     let mut x = 0;
-                    while x + 3 < new_width {
+                    while x + 7 < new_width {
                         for i in 0..8 {
                             let target_idx = target_row_base + x + i;
-                            let orig_idx = (orig_row_base + *mapping.x_indices.get_unchecked(x + i)) * 3;
+                            let orig_idx = (orig_row_base + *x_indices.get_unchecked(x + i)) * 3;
                             
                             let r = *img_ptr.add(orig_idx) as usize;
                             let g = *img_ptr.add(orig_idx + 1) as usize;
                             let b = *img_ptr.add(orig_idx + 2) as usize;
                             
-                            *buffer_ptr.add(target_idx) = *lut_ptr.add(r);
-                            *buffer_ptr.add(target_idx + target_pixels) = *lut_ptr.add(g);
-                            *buffer_ptr.add(target_idx + target_pixels * 2) = *lut_ptr.add(b);
+                            // CHW format
+                            *output_ptr.add(target_idx) = *lut_ptr.add(r);
+                            *output_ptr.add(target_idx + target_pixels) = *lut_ptr.add(g);
+                            *output_ptr.add(target_idx + target_pixels * 2) = *lut_ptr.add(b);
                         }
                         x += 8;
                     }
                     
-                    // Handle remaining pixels
+                    // Remaining pixels
                     while x < new_width {
                         let target_idx = target_row_base + x;
-                        let orig_idx = (orig_row_base + *mapping.x_indices.get_unchecked(x)) * 3;
+                        let orig_idx = (orig_row_base + *x_indices.get_unchecked(x)) * 3;
                         
                         let r = *img_ptr.add(orig_idx) as usize;
                         let g = *img_ptr.add(orig_idx + 1) as usize;
                         let b = *img_ptr.add(orig_idx + 2) as usize;
                         
-                        *buffer_ptr.add(target_idx) = *lut_ptr.add(r);
-                        *buffer_ptr.add(target_idx + target_pixels) = *lut_ptr.add(g);
-                        *buffer_ptr.add(target_idx + target_pixels * 2) = *lut_ptr.add(b);
+                        *output_ptr.add(target_idx) = *lut_ptr.add(r);
+                        *output_ptr.add(target_idx + target_pixels) = *lut_ptr.add(g);
+                        *output_ptr.add(target_idx + target_pixels * 2) = *lut_ptr.add(b);
                         
                         x += 1;
                     }
                 }
             }
             
-            // Safe conversion to bytes
+            // Zero-copy conversion
             Ok(unsafe {
                 std::slice::from_raw_parts(
-                    buffer.as_ptr() as *const u8,
-                    buffer.len() * 4
+                    output.as_ptr() as *const u8,
+                    output.len() * 4
                 ).to_vec()
             })
-        })
-    })
-}
-
-fn postprocess_yolo_fp16(
-    data: &[u8],
-    image_height: usize,
-    image_width: usize,
-    target_anchors: usize,
-    target_classes: usize
-) -> Result<Vec<InferenceResult>, Error> {
-    // Calculate letterbox parameters (same as preprocessing)
-    let (_, _, pad_x, pad_y, inv_scale) = calculate_letterbox_params(image_height, image_width);
-    
-    // Convert to f32 for calculations
-    let pad_x_f32 = pad_x as f32;
-    let pad_y_f32 = pad_y as f32;
-    
-    let mut detections = Vec::with_capacity(100);
-    
-    // Cast bytes directly to u16 slice
-    let u16_data = unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr() as *const u16,
-            data.len() / 2
-        )
-    };
-    
-    for anchor_idx in 0..target_anchors {
-        // Calculate indices for transposed access pattern
-        let x_idx = anchor_idx;
-        let y_idx = target_anchors + anchor_idx;
-        let w_idx = 2 * target_anchors + anchor_idx;
-        let h_idx = 3 * target_anchors + anchor_idx;
-        
-        // Bounds check before unsafe access
-        if h_idx >= u16_data.len() {
-            continue;
-        }
-        
-        unsafe {
-            // Convert f16 to f32 on the fly
-            let x = f16::from_bits(*u16_data.get_unchecked(x_idx)).to_f32();
-            let y = f16::from_bits(*u16_data.get_unchecked(y_idx)).to_f32();
-            let w = f16::from_bits(*u16_data.get_unchecked(w_idx)).to_f32();
-            let h = f16::from_bits(*u16_data.get_unchecked(h_idx)).to_f32();
-            
-            // Convert to corner coordinates
-            let x1 = x - w * 0.5;
-            let y1 = y - h * 0.5;
-            let x2 = x + w * 0.5;
-            let y2 = y + h * 0.5;
-            
-            // Model outputs are already in pixel coordinates (0-640 range)
-            // Remove letterbox padding directly
-            let x1_unpadded = x1 - pad_x_f32;
-            let y1_unpadded = y1 - pad_y_f32;
-            let x2_unpadded = x2 - pad_x_f32;
-            let y2_unpadded = y2 - pad_y_f32;
-            
-            // Scale back to original image dimensions
-            let final_x1 = x1_unpadded * inv_scale;
-            let final_y1 = y1_unpadded * inv_scale;
-            let final_x2 = x2_unpadded * inv_scale;
-            let final_y2 = y2_unpadded * inv_scale;
-            
-            let mut max_score: f32 = 0.0;
-            let mut max_class: usize = 0;
-            
-            for class_idx in 0..target_classes {
-                let prob_idx = (4 + class_idx) * target_anchors + anchor_idx;
-                if prob_idx < u16_data.len() {
-                    let score = f16::from_bits(*u16_data.get_unchecked(prob_idx)).to_f32();
-                    if score > max_score {
-                        max_score = score;
-                        max_class = class_idx;
-                    }
-                }
-            }
-            
-            detections.push(InferenceResult {
-                bbox: [final_x1, final_y1, final_x2, final_y2],
-                class: max_class,
-                score: max_score,
-            });
         }
     }
-    
-    Ok(detections)
-}
-
-fn postprocess_yolo_fp32(
-    data: &[u8],
-    image_height: usize,
-    image_width: usize,
-    target_anchors: usize,
-    target_classes: usize
-) -> Result<Vec<InferenceResult>, Error> {
-    // Calculate letterbox parameters (same as preprocessing)
-    let (_, _, pad_x, pad_y, inv_scale) = calculate_letterbox_params(image_height, image_width);
-    
-    // Convert to f32 for calculations
-    let pad_x_f32 = pad_x as f32;
-    let pad_y_f32 = pad_y as f32;
-    
-    // Pre-allocate with estimated capacity
-    let mut detections = Vec::with_capacity(100);
-    
-    // Cast bytes directly to f32 slice (unsafe but fast)
-    let f32_data = unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr() as *const f32,
-            data.len() / 4
-        )
-    };
-    
-    // Process each anchor directly without transpose
-    for anchor_idx in 0..target_anchors {
-        // Calculate indices for transposed access pattern
-        let x_idx = anchor_idx; // row 0
-        let y_idx = target_anchors + anchor_idx;
-        let w_idx = 2 * target_anchors + anchor_idx;
-        let h_idx = 3 * target_anchors + anchor_idx;
-        
-        // Bounds check before unsafe access
-        if h_idx >= f32_data.len() {
-            continue;
-        }
-        
-        unsafe {
-            let x = *f32_data.get_unchecked(x_idx);
-            let y = *f32_data.get_unchecked(y_idx);
-            let w = *f32_data.get_unchecked(w_idx);
-            let h = *f32_data.get_unchecked(h_idx);
-            
-            // Convert to corner coordinates
-            let x1 = x - w * 0.5;
-            let y1 = y - h * 0.5;
-            let x2 = x + w * 0.5;
-            let y2 = y + h * 0.5;
-            
-            // Model outputs are already in pixel coordinates (0-640 range)
-            // Remove letterbox padding directly
-            let x1_unpadded = x1 - pad_x_f32;
-            let y1_unpadded = y1 - pad_y_f32;
-            let x2_unpadded = x2 - pad_x_f32;
-            let y2_unpadded = y2 - pad_y_f32;
-            
-            // Scale back to original image dimensions
-            let final_x1 = x1_unpadded * inv_scale;
-            let final_y1 = y1_unpadded * inv_scale;
-            let final_x2 = x2_unpadded * inv_scale;
-            let final_y2 = y2_unpadded * inv_scale;
-            
-            // Find max probability and class using SIMD-friendly loop
-            let mut max_score: f32 = 0.0;
-            let mut max_class: usize = 0;
-            
-            for class_idx in 0..target_classes {
-                let prob_idx = (4 + class_idx) * target_anchors + anchor_idx;
-                if prob_idx < f32_data.len() {
-                    let score = *f32_data.get_unchecked(prob_idx);
-                    if score > max_score {
-                        max_score = score;
-                        max_class = class_idx;
-                    }
-                }
-            }
-            
-            detections.push(InferenceResult {
-                bbox: [final_x1, final_y1, final_x2, final_y2],
-                class: max_class,
-                score: max_score,
-            });
-        }
-    }
-    
-    Ok(detections)
-}
-
-fn bbox_nms(mut detections: Vec<InferenceResult>, nms_iou_threshold: f32) -> Vec<InferenceResult> {
-    if detections.len() <= 1 {
-        return detections;
-    }
-    
-    // Sort by score (descending) using unstable sort for speed
-    detections.sort_unstable_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    
-    let mut keep = Vec::with_capacity(detections.len());
-    let mut suppressed = vec![false; detections.len()];
-    
-    for i in 0..detections.len() {
-        if unsafe { *suppressed.get_unchecked(i) } {
-            continue;
-        }
-        
-        let detection_i = unsafe { detections.get_unchecked(i) };
-        keep.push(*detection_i);
-        
-        // Only check remaining detections of same class
-        for j in (i + 1)..detections.len() {
-            if unsafe { *suppressed.get_unchecked(j) } {
-                continue;
-            }
-            
-            let detection_j = unsafe { detections.get_unchecked(j) };
-            
-            if detection_i.class != detection_j.class {
-                continue;
-            }
-            
-            if get_boxes_iou(&detection_i.bbox, &detection_j.bbox) > nms_iou_threshold {
-                unsafe { *suppressed.get_unchecked_mut(j) = true; }
-            }
-        }
-    }
-    
-    keep
-}
-
-fn get_boxes_iou(bbox1: &[f32; 4], bbox2: &[f32; 4]) -> f32 {
-    let x1_max = bbox1[0].max(bbox2[0]);
-    let y1_max = bbox1[1].max(bbox2[1]);
-    let x2_min = bbox1[2].min(bbox2[2]);
-    let y2_min = bbox1[3].min(bbox2[3]);
-    
-    let intersection_width = x2_min - x1_max;
-    let intersection_height = y2_min - y1_max;
-    
-    if intersection_width <= 0.0 || intersection_height <= 0.0 {
-        return 0.0;
-    }
-    
-    let intersection_area = intersection_width * intersection_height;
-    let bbox1_area = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1]);
-    let bbox2_area = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1]);
-    let union_area = bbox1_area + bbox2_area - intersection_area;
-    
-    intersection_area / union_area
-}
-
-pub fn preprocess_yolo(
-    image: &[u8], 
-    image_height: usize, 
-    image_width: usize, 
-    input_shape: &[i64; 3], 
-    precision: InferencePrecision
-) -> Result<Vec<u8>, Error> {
-    // Pre-Process depending on precision
-    if image.len() != image_height * image_width * 3 {
-        return Err(Error::new(ErrorKind::Other, "Input image buffer size does not match dimensions. Must be RGB image."));
-    }
-
-    // Calculate target sizes
-    let target_size = input_shape[1].clone() as usize;
-    let target_pixels = target_size * target_size;
-
-    // Get raw input bytes
-    let bytes = match precision {
-        InferencePrecision::FP16 => preprocess_yolo_fp16(&image, image_height, image_width, target_size, target_pixels),
-        InferencePrecision::FP32 => preprocess_yolo_fp32(&image, image_height, image_width, target_size, target_pixels)
-    }
-    .map_err(|e| Error::new(ErrorKind::Other, e))?;
-
-    Ok(bytes)
-}
-
-pub fn postprocess_yolo(    
-    results: &[u8], 
-    image_height: usize,
-    image_width: usize,
-    output_shape: &[i64; 2], 
-    precision: InferencePrecision,
-    pred_conf_threshold: f32,
-    nms_iou_threshold: f32
-) -> Result<Vec<InferenceResult>, Error> {
-    // Calculate target sizes: FP16 = 2 bytes, FP32 = 4 bytes
-    let target_features = output_shape[0].clone() as usize;
-    let target_anchors = output_shape[1].clone() as usize;
-    let target_classes = target_features - 4;
-    let target_size = match precision {
-        InferencePrecision::FP16 => target_anchors * target_features * 2,
-        InferencePrecision::FP32 => target_anchors * target_features * 4
-    } as usize;
-    
-    if results.len() != target_size {
-        return Err(Error::new(
-            ErrorKind::Other, 
-            format!("Got unexpected size of model output ({}). Got {}, expected {}", precision.to_string(), results.len(), target_size)
-        ))
-    }
-
-    // Get processed detections
-    let mut detections = match precision {
-        InferencePrecision::FP16 => postprocess_yolo_fp16(results, image_height, image_width, target_anchors, target_classes)?,
-        InferencePrecision::FP32 => postprocess_yolo_fp32(results, image_height, image_width, target_anchors, target_classes)?,
-    };
-
-    // Filter by confidence before nms
-    detections.retain(|r| r.score >= pred_conf_threshold);
-
-    // Perform nms on bboxes
-    detections = bbox_nms(detections, nms_iou_threshold);
-
-    Ok(detections)
 }
