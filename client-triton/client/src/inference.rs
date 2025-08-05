@@ -7,6 +7,13 @@ use std::io::{Error, ErrorKind};
 use serde_json::json;
 use std::str::FromStr;
 
+#[derive(Clone, Debug)]
+pub struct InferenceFrame {
+    pub data: Vec<u8>,
+    pub height: usize,
+    pub width: usize
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum InferencePrecision {
     FP32,
@@ -50,6 +57,7 @@ pub struct InferenceModel {
     output_name: String,
     output_shape: [i64; 2],
     precision: InferencePrecision,
+    nms_iou_threshold: f32,
     base_request: ModelInferRequest
 }
 
@@ -61,7 +69,8 @@ impl InferenceModel {
         input_shape: [i64; 3],
         output_name: String, 
         output_shape: [i64; 2],
-        precision: InferencePrecision
+        precision: InferencePrecision,
+        nms_iou_threshold: f32
     ) -> Result<Self, Error> {
         //Create client instance
         let client = Client::new("http://localhost:8001/", None).await
@@ -111,6 +120,7 @@ impl InferenceModel {
             output_name,
             output_shape,
             precision,
+            nms_iou_threshold,
             base_request
         })
     }
@@ -212,11 +222,9 @@ impl InferenceModel {
         .map_err(|e| Error::new(ErrorKind::Other, e))?;
 
         // Return inference results
-        // Return first once since inference is on one image only
         Ok(
-            inference_result.raw_output_contents.first()
+            inference_result.raw_output_contents.into_iter().next()
             .expect("Error getting inference results for image")
-            .to_vec()
         )
     }
 }
@@ -252,6 +260,10 @@ impl InferenceModel {
 
     pub fn precision(&self) -> InferencePrecision {
         self.precision
+    }
+
+    pub fn nms_iou_threshold(&self) -> f32 {
+        self.nms_iou_threshold
     }
 
     pub fn base_request(&self) -> &ModelInferRequest {

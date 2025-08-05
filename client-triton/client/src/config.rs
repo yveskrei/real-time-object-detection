@@ -23,13 +23,15 @@ pub struct Config {
     source_ids: Vec<String>,
     source_confs: HashMap<String, f32>,
     source_conf_default: f32,
+    source_inf_frames: HashMap<String, usize>,
+    source_inf_frame_default: usize,
     model_name: String,
     model_version: String,
     model_input_name: String,
     model_input_shape: [i64; 3],
     model_output_name: String,
     model_output_shape: [i64; 2],
-    nms_iou_thrershold: f32,
+    nms_iou_threshold: f32,
     nms_conf_thrershold: f32,
     model_precision: InferencePrecision
 }
@@ -49,12 +51,13 @@ impl Config {
             &env::var("SOURCE_IDS")
             .expect("SOURCES_IDS variable not found")
         );
+
+        // Append confidence threshold for each source
+        // Check if source has a prefrred setting and assign default value if not
         let mut source_confs: HashMap<String, f32> = Config::parse_key_values(
             &env::var("SOURCE_CONFS")
             .expect("SOURCES_IDS variable not found")
         );
-
-        // Append default confidence stream where not specified
         let source_conf_default: f32  = env::var("SOURCE_CONF_DEFAULT")
             .expect("SOURCE_CONF_DEFAULT variable not found")
             .parse()
@@ -70,6 +73,31 @@ impl Config {
                 source_confs.insert(
                     source.to_string(), 
                     source_conf_default
+                );
+            }
+        }
+
+        // Append setting for what frame we want to send inference on for each source
+        // Check if source has a prefrred setting and assign default value if not
+        let mut source_inf_frames: HashMap<String, usize> = Config::parse_key_values(
+            &env::var("SOURCE_INF_FRAMES")
+            .expect("SOURCE_INF_FRAMES variable not found")
+        );
+        let source_inf_frame_default: usize  = env::var("SOURCE_INF_FRAME_DEFAULT")
+            .expect("SOURCE_INF_FRAME_DEFAULT variable not found")
+            .parse()
+            .expect("SOURCE_INF_FRAME_DEFAULT must be a positive integer");
+        
+        for source in source_ids.iter() {
+            let valid = source_inf_frames
+                .get(source)
+                .map(|v| (0..=30).contains(v))
+                .unwrap_or(false);
+
+            if !valid {
+                source_inf_frames.insert(
+                    source.to_string(), 
+                    source_inf_frame_default
                 );
             }
         }
@@ -107,7 +135,7 @@ impl Config {
             .expect("Output must be exactly 2 in length (e.g. 84, 8400)");
 
         // Detection processing
-        let nms_iou_thrershold: f32  = env::var("NMS_IOU_THRESHOLD")
+        let nms_iou_threshold: f32  = env::var("NMS_IOU_THRESHOLD")
             .expect("NMS_IOU_THRESHOLD variable not found")
             .parse()
             .expect("NMS_IOU_THRESHOLD must be a float");
@@ -123,6 +151,8 @@ impl Config {
             source_ids,
             source_confs,
             source_conf_default,
+            source_inf_frames,
+            source_inf_frame_default,
             model_name,
             model_version,
             model_input_name,
@@ -130,7 +160,7 @@ impl Config {
             model_output_name,
             model_output_shape,
             model_precision,
-            nms_iou_thrershold,
+            nms_iou_threshold,
             nms_conf_thrershold
         })
     }
@@ -221,6 +251,14 @@ impl Config {
         self.source_conf_default
     }
 
+    pub fn source_inf_frames(&self) -> &HashMap<String, usize> {
+        &self.source_inf_frames
+    }
+
+    pub fn source_inf_frame_default(&self) -> usize {
+        self.source_inf_frame_default
+    }
+
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
@@ -245,8 +283,8 @@ impl Config {
         &self.model_output_shape
     }
 
-    pub fn nms_iou_thrershold(&self) -> f32 {
-        self.nms_iou_thrershold
+    pub fn nms_iou_threshold(&self) -> f32 {
+        self.nms_iou_threshold
     }
 
     pub fn nms_conf_thrershold(&self) -> f32 {
