@@ -1,55 +1,45 @@
 use std::io::{Error, ErrorKind};
 use std::sync::{Arc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 // Custom modules
 use client::config::{Config, Environment};
-use client::inference::{InferenceModel};
-use client::source::{INFERENCE_MODEL};
-use client::source::{PROCESSORS, SourceProcessor};
+use client::inference::{self, InferenceModel};
+use client::source::{self, SourceProcessor};
+use client::utils;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //Iniaitlize config
     let app_config = Config::new(true, Environment::Production)
         .expect("Error loading config");
 
-    //Initiate model
-    let inference_model = InferenceModel::new(
-        app_config.model_name().to_string(), 
-        app_config.model_version().to_string(), 
-        app_config.model_input_name().to_string(), 
-        app_config.model_input_shape().clone(),
-        app_config.model_output_name().to_string(), 
-        app_config.model_output_shape().clone(),
-        app_config.model_precision(),
-        app_config.nms_iou_threshold()
-    )
-        .await
-        .map_err(|e| Error::new(ErrorKind::Other, e))?;
-
-    INFERENCE_MODEL.set(Arc::new(inference_model))
-        .map_err(|_| "Inference model is already iniitated")?;
+    //Initiate inference client
+    inference::init_inference_model(&app_config);
 
     // Initiate sources processors
-    for source_id in app_config.source_ids().iter() {
-        let confidence_threshold = app_config.source_confs()
-            .get(source_id)
-            .expect("Source does not have confidence threshold setting");
-        let inference_frame = app_config.source_inf_frames()
-            .get(source_id)
-            .expect("Source does not have inference frame setting");
-        
-        // Start processor
-        let processor = Arc::new(SourceProcessor::new(
-            source_id.clone(), 
-            *confidence_threshold, 
-            *inference_frame
-        ));
+    source::init_source_processors(&app_config);
 
-        PROCESSORS
-            .write()
-            .unwrap()
-            .insert(source_id.clone(), processor);
+    // Perform test inference
+    let interval = Duration::from_millis(1000);
+    let (image, image_height, image_width) = utils::get_image_raw("/mnt/disk_d/Programming/real-time-object-detection/client-triton/giraffes.jpg")
+        .expect("Error loading sample image");
+    let processor1 = source::get_source_processor("2025");
+    let processor2 = source::get_source_processor("3033");
+    
+    loop {
+        let start = Instant::now();
+
+        // Trigger frame processing
+        processor1.process_frame(&image.clone(), image_height, image_width);
+        processor2.process_frame(&image.clone(), image_height, image_width);
+        
+        // Calculate how long to sleep to maintain 34ms intervals
+        let elapsed = start.elapsed();
+        if elapsed < interval {
+            tokio::time::sleep(interval - elapsed).await;
+        }
     }
 
     Ok(())

@@ -20,6 +20,7 @@ services:
     command: >
       tritonserver
       --model-repository=/models
+      --model-control-mode=explicit
       --allow-http=true
       --allow-grpc=true
       --allow-metrics=true

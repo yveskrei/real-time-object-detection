@@ -25,6 +25,7 @@ pub struct Config {
     source_conf_default: f32,
     source_inf_frames: HashMap<String, usize>,
     source_inf_frame_default: usize,
+    triton_url: String,
     model_name: String,
     model_version: String,
     model_input_name: String,
@@ -103,6 +104,8 @@ impl Config {
         }
 
         // Inference model
+        let triton_url = env::var("TRITON_URL")
+            .expect("TRITON_URL variable not found");
         let model_name = env::var("MODEL_NAME")
             .expect("MODEL_NAME variable not found");
         let model_version = env::var("MODEL_VERSION")
@@ -153,6 +156,7 @@ impl Config {
             source_conf_default,
             source_inf_frames,
             source_inf_frame_default,
+            triton_url,
             model_name,
             model_version,
             model_input_name,
@@ -257,6 +261,10 @@ impl Config {
 
     pub fn source_inf_frame_default(&self) -> usize {
         self.source_inf_frame_default
+    }
+
+    pub fn triton_url(&self) -> &str {
+        &self.triton_url
     }
 
     pub fn model_name(&self) -> &str {

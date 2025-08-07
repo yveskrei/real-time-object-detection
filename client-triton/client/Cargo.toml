@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 dotenvy = "0.15"
-tokio = "1.47.0"
+tokio = { version = "1.47.0", features = ["rt-multi-thread", "macros", "time", "sync"] }
 serde_json = "1.0.141"
 image = "0.25.6"
 triton-client = "0.2.0"
