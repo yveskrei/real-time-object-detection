@@ -1,8 +1,11 @@
-use std::io::{Error, ErrorKind};
 use image::{ImageReader, GenericImageView};
+use anyhow::{Result, Context};
 
-pub fn get_image_raw(path: &str) -> Result<(Vec<u8>, usize, usize), Error> {
-    let image = ImageReader::open(path).unwrap().decode().unwrap();
+pub fn get_image_raw(path: &str) -> Result<(Vec<u8>, usize, usize)> {
+    let image = ImageReader::open(path)
+        .context("Error opening image from path")?
+        .decode()
+        .context("Error decoding image")?;
 
     // Get dimensions
     let (width, height) = image.dimensions();

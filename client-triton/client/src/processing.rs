@@ -1,5 +1,5 @@
-use std::io::{Error, ErrorKind};
 use std::sync::OnceLock;
+use anyhow::{Result};
 
 // Custom modules
 use crate::inference::{InferencePrecision, InferenceResult, InferenceFrame};
@@ -145,7 +145,7 @@ pub fn postprocess_yolo(
     precision: InferencePrecision,
     pred_conf_threshold: f32,
     nms_iou_threshold: f32,
-) -> Result<Vec<InferenceResult>, Error> {
+) -> Result<Vec<InferenceResult>> {
     // Initialize LUT once (thread-safe)
     get_f16_lut();
     
@@ -160,15 +160,14 @@ pub fn postprocess_yolo(
     };
     
     if results.len() != expected_size {
-        return Err(Error::new(
-            ErrorKind::Other,
+        anyhow::bail!(
             format!(
                 "Got unexpected size of model output ({}). Got {}, expected {}",
                 precision.to_string(),
                 results.len(),
                 expected_size
-            ),
-        ));
+            )
+        );
     }
     
     // Precompute letterbox parameters
@@ -385,10 +384,23 @@ pub fn preprocess_yolo(
     frame: &InferenceFrame,
     input_shape: &[i64; 3],
     precision: InferencePrecision,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Vec<u8>> {
+    // Check if input size matches
+    let frame_target_size = frame.height * frame.width * 3;
+    if frame.data.len() != frame_target_size {
+        anyhow::bail!(
+            format!(
+                "Got unexpected size of frame input. Got {}, expected {}",
+                frame.data.len(),
+                frame_target_size
+            )
+        );
+    }
+
+    // Calculate target size
     let target_size = input_shape[1] as usize;
     let target_pixels = target_size * target_size;
-    
+
     // Fast letterbox calculation
     let scale = (target_size as f32) / (frame.height.max(frame.width) as f32);
     let new_width = ((frame.width as f32 * scale) as usize).min(target_size);
