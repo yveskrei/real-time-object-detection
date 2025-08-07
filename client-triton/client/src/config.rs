@@ -1,11 +1,11 @@
 use dotenvy::from_path;
 use std::path::Path;
-use std::io::Error;
 use std::env;
 use std::process::Command;
 use tracing_subscriber::{fmt, EnvFilter};
 use std::collections::HashMap;
 use std::str::FromStr;
+use anyhow::{self, Result, Context};
 
 // Custom modules
 use crate::inference::InferencePrecision;
@@ -38,10 +38,10 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(local: bool, environment: Environment) -> Result<Self, Error> {
+    pub fn new(local: bool, environment: Environment) -> Result<Self> {
         // Load variables from local env file
         if local {
-            Config::load_env_file(environment);
+            Config::load_env_file(environment)?;
         }
 
         // Initiate app logging
@@ -50,19 +50,19 @@ impl Config {
         // Streams
         let source_ids: Vec<String> = Config::parse_list(
             &env::var("SOURCE_IDS")
-            .expect("SOURCES_IDS variable not found")
+            .context("SOURCES_IDS variable not found")?
         );
 
         // Append confidence threshold for each source
         // Check if source has a prefrred setting and assign default value if not
         let mut source_confs: HashMap<String, f32> = Config::parse_key_values(
             &env::var("SOURCE_CONFS")
-            .expect("SOURCES_IDS variable not found")
+            .context("SOURCES_IDS variable not found")?
         );
         let source_conf_default: f32  = env::var("SOURCE_CONF_DEFAULT")
-            .expect("SOURCE_CONF_DEFAULT variable not found")
+            .context("SOURCE_CONF_DEFAULT variable not found")?
             .parse()
-            .expect("SOURCE_CONF_DEFAULT must be a float");
+            .context("SOURCE_CONF_DEFAULT must be a float")?;
 
         for source in source_ids.iter() {
             let valid = source_confs
@@ -82,12 +82,12 @@ impl Config {
         // Check if source has a prefrred setting and assign default value if not
         let mut source_inf_frames: HashMap<String, usize> = Config::parse_key_values(
             &env::var("SOURCE_INF_FRAMES")
-            .expect("SOURCE_INF_FRAMES variable not found")
+            .context("SOURCE_INF_FRAMES variable not found")?
         );
         let source_inf_frame_default: usize  = env::var("SOURCE_INF_FRAME_DEFAULT")
-            .expect("SOURCE_INF_FRAME_DEFAULT variable not found")
+            .context("SOURCE_INF_FRAME_DEFAULT variable not found")?
             .parse()
-            .expect("SOURCE_INF_FRAME_DEFAULT must be a positive integer");
+            .context("SOURCE_INF_FRAME_DEFAULT must be a positive integer")?;
         
         for source in source_ids.iter() {
             let valid = source_inf_frames
@@ -105,48 +105,48 @@ impl Config {
 
         // Inference model
         let triton_url = env::var("TRITON_URL")
-            .expect("TRITON_URL variable not found");
+            .context("TRITON_URL variable not found")?;
         let model_name = env::var("MODEL_NAME")
-            .expect("MODEL_NAME variable not found");
+            .context("MODEL_NAME variable not found")?;
         let model_version = env::var("MODEL_VERSION")
-            .expect("MODEL_VERSION variable not found");
+            .context("MODEL_VERSION variable not found")?;
         let model_input_name = env::var("MODEL_INPUT_NAME")
-            .expect("MODEL_INPUT_NAME variable not found");
+            .context("MODEL_INPUT_NAME variable not found")?;
         let model_output_name = env::var("MODEL_OUTPUT_NAME")
-            .expect("MODEL_OUTPUT_NAME variable not found");
+            .context("MODEL_OUTPUT_NAME variable not found")?;
         let model_precision: InferencePrecision = env::var("MODEL_PRECISION")
-            .expect("MODEL_PRECISION variable not found")
+            .context("MODEL_PRECISION variable not found")?
             .parse()
-            .expect("Must be valid precision");
+            .context("Must be valid precision")?;
 
         // Model input
         let model_input_shape: Vec<i64> = Config::parse_list(
             &env::var("MODEL_INPUT_SHAPE")
-            .expect("MODEL_INPUT_SHAPE variable not found")
+            .context("MODEL_INPUT_SHAPE variable not found")?
         );
         let model_input_shape: [i64; 3] = model_input_shape
             .try_into()
-            .expect("Input must be exactly 3 in length (e.g. 3, 640, 640)");
+            .map_err(|_| anyhow::anyhow!("Input must be exactly 3 in length (e.g. 3, 640, 640)"))?;
 
         // Model output
         let model_output_shape: Vec<i64> = Config::parse_list(
             &env::var("MODEL_OUTPUT_SHAPE")
-            .expect("MODEL_OUTPUT_SHAPE variable not found")
+            .context("MODEL_OUTPUT_SHAPE variable not found")?
         );
         let model_output_shape: [i64; 2] = model_output_shape
             .try_into()
-            .expect("Output must be exactly 2 in length (e.g. 84, 8400)");
+            .map_err(|_| anyhow::anyhow!("Output must be exactly 2 in length (e.g. 84, 8400)"))?;
 
         // Detection processing
         let nms_iou_threshold: f32  = env::var("NMS_IOU_THRESHOLD")
-            .expect("NMS_IOU_THRESHOLD variable not found")
+            .context("NMS_IOU_THRESHOLD variable not found")?
             .parse()
-            .expect("NMS_IOU_THRESHOLD must be a float");
+            .context("NMS_IOU_THRESHOLD must be a float")?;
 
         let nms_conf_thrershold: f32 = env::var("NMS_CONF_THRESHOLD")
-            .expect("NMS_CONF_THRESHOLD variable not found")
+            .context("NMS_CONF_THRESHOLD variable not found")?
             .parse()
-            .expect("NMS_CONF_THRESHOLD must be a float");
+            .context("NMS_CONF_THRESHOLD must be a float")?;
 
         Ok(Self {
             local,
@@ -169,19 +169,24 @@ impl Config {
         })
     }
 
-    fn load_env_file(environment: Environment) {
+    fn load_env_file(environment: Environment) -> Result<()> {
         let base_dir = Path::new(file!()).parent()
-            .expect("Error getting config parent directory");
+            .context("Error getting config parent directory")?;
 
         let env_file = match environment {
             Environment::Production => ".env_test",
             Environment::NonProduction => ".env_test"
         };
 
-        let env_path = base_dir.join(format!("./secrets/{}", env_file)).canonicalize()
-            .expect("Local environment variable not found!");
+        let env_path = base_dir.join(format!("./secrets/{}", env_file))
+            .canonicalize()
+            .context("Local environment variable not found!")?;
+        
+        // Load variables to environment
+        from_path(env_path)
+            .expect("Error loading local env file");
 
-        from_path(env_path).expect("Error loading local env file");
+        Ok(())
     }
 
     fn init_logging() {
@@ -194,13 +199,16 @@ impl Config {
             .init();
     }
 
-    fn get_gpu() -> String {
+    fn get_gpu() -> Result<String> {
         let output = Command::new("nvidia-smi")
             .args(&["--query-gpu=name", "--format=csv,noheader"])
             .output()
-            .expect("failed to execute nvidia-smi");
+            .context("failed to execute nvidia-smi")?;
 
-        String::from_utf8_lossy(&output.stdout).to_string()
+        Ok(
+            String::from_utf8_lossy(&output.stdout)
+                .to_string()
+        )
     }
 
     fn parse_key_values<T>(input: &str) -> HashMap<String, T>
@@ -229,7 +237,7 @@ impl Config {
     {
         input
             .split(',')
-            .map(|s| s.trim().parse::<T>().expect("Error parsing list"))
+            .filter_map(|s| s.trim().parse::<T>().ok())
             .collect()
     }
 }

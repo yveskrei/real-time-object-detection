@@ -3,22 +3,28 @@ use triton_client::inference::{ModelInferRequest, RepositoryModelLoadRequest, Mo
 use triton_client::inference::model_infer_request::{InferInputTensor, InferRequestedOutputTensor};
 use triton_client::inference::model_repository_parameter::{ParameterChoice};
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind};
 use serde_json::json;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
+use anyhow::{self, Result, Context};
 
 // Custom modules
 use crate::config::Config;
 
 // Static inference model
 pub static INFERENCE_MODEL: OnceLock<Arc<InferenceModel>> = OnceLock::new();
-pub fn get_inference_model() -> &'static Arc<InferenceModel> {
-    INFERENCE_MODEL
-        .get()
-        .expect("Infernece model is not initiated!")
+pub fn get_inference_model() -> Result<&'static Arc<InferenceModel>> {
+    Ok(
+        INFERENCE_MODEL
+            .get()
+            .context("Infernece model is not initiated!")?
+    )
 }
-pub async fn init_inference_model(app_config: &Config) -> Result<(), Error> {
+pub async fn init_inference_model(app_config: &Config) -> Result<()> {
+    if let Ok(_) = get_inference_model() {
+        anyhow::bail!("Model is already initiated!")
+    }
+
     // Create new instance
     let client_instance = InferenceModel::new(
         app_config.triton_url().to_string(),
@@ -32,16 +38,16 @@ pub async fn init_inference_model(app_config: &Config) -> Result<(), Error> {
         app_config.nms_iou_threshold()
     )
         .await
-        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+        .context("Error creating model instance")?;
 
     // Initiate model instances
     client_instance.load_model(app_config.source_ids().len())
         .await
-        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+        .context("Error loading model instances")?;
 
     // Set global variable
     INFERENCE_MODEL.set(Arc::new(client_instance))
-        .map_err(|_| Error::new(ErrorKind::Other, "Model is already initiated"))?;
+        .map_err(|_| anyhow::anyhow!("Error setting model instance"))?;
 
     Ok(())
 }
@@ -69,13 +75,13 @@ impl InferencePrecision {
 }
 
 impl FromStr for InferencePrecision {
-    type Err = String;
+    type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         match s.to_uppercase().as_str() {
             "FP32" => Ok(InferencePrecision::FP32),
             "FP16" => Ok(InferencePrecision::FP16),
-            _ => Err(format!("Invalid precision: {}", s)),
+            _ => anyhow::bail!("Invalid precision")
         }
     }
 }
@@ -112,17 +118,19 @@ impl InferenceModel {
         output_shape: [i64; 2],
         precision: InferencePrecision,
         nms_iou_threshold: f32
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         //Create client instance
-        let client = Client::new(&triton_url, None).await
-        .map_err(|e| Error::new(ErrorKind::ConnectionRefused, e))?;
+        let client = Client::new(&triton_url, None)
+            .await
+            .context("Error creating triton client instance")?;
 
         // Check if server is ready
-        let server_ready = client.server_ready().await
-        .map_err(|e| Error::new(ErrorKind::ConnectionRefused, e))?;
+        let server_ready = client.server_ready()
+            .await
+            .context("Error getting model ready status")?;
 
         if !server_ready.ready {
-            return Err(Error::new(ErrorKind::ConnectionRefused, "Triton server is not ready"));
+            anyhow::bail!("Triton server is not ready");
         }
 
         // Create base inference request
@@ -167,7 +175,7 @@ impl InferenceModel {
         })
     }
 
-    pub async fn load_model(&self, instances: usize) -> Result<(), Error> {
+    pub async fn load_model(&self, instances: usize) -> Result<()> {
         let model_config = json!({
             "name": self.model_name,
             "platform": "tensorrt_plan",
@@ -245,27 +253,29 @@ impl InferenceModel {
             repository_name: "".to_string(), 
             model_name: self.model_name.clone(), 
             parameters: parameters
-        }).await
-            .map_err(|e| Error::new(ErrorKind::Other, e))?;
+        })
+            .await
+            .context("Error loading triton model instances")?;
 
         Ok(())
     }
 
-    pub async fn infer(&self, image: &[u8]) -> Result<Vec<u8>, Error> {
+    pub async fn infer(&self, image: &[u8]) -> Result<Vec<u8>> {
         // Create new inference request
         let mut inference_request = self.base_request.clone();
         inference_request.raw_input_contents = vec![image.to_vec()];
 
         // Perform inference
-        let inference_result = self.client.model_infer(inference_request).await
-            .map_err(|e| Error::new(ErrorKind::Other, e))?;
+        let inference_result = self.client.model_infer(inference_request)
+            .await
+            .context("Error sending triton inference request")?;
 
         // Return inference results
         Ok(
             inference_result.raw_output_contents
                 .into_iter()
                 .next()
-                .expect("Error getting inference results for image")
+                .context("Error getting inference results for image")?
         )
     }
 

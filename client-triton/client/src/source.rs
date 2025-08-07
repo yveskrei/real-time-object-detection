@@ -1,9 +1,9 @@
-use std::io::{Error, ErrorKind};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use std::sync::atomic::{Ordering, AtomicU64};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use anyhow::{Result, Context};
 
 // Custom modules
 use crate::inference::{self, InferenceFrame, InferenceResult};
@@ -13,22 +13,24 @@ use crate::config::Config;
 // Static source processors
 pub static PROCESSORS: Lazy<RwLock<HashMap<String, Arc<SourceProcessor>>>> = 
     Lazy::new(|| RwLock::new(HashMap::new()));
-pub fn get_source_processor(stream_id: &str) -> Arc<SourceProcessor> {
-    PROCESSORS
+pub fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
+    Ok(
+        PROCESSORS
         .read()
-        .expect("Source processor is not initiated!")
+        .map_err(|_| anyhow::anyhow!("Source processor is not initiated!"))?
         .get(&stream_id.to_string())
         .cloned()
-        .expect("Error getting source processor")
+        .context("Error getting source processor")?
+    )
 }
-pub async fn init_source_processors(app_config: &Config) -> Result<(), Error> {
+pub async fn init_source_processors(app_config: &Config) -> Result<()> {
     for source_id in app_config.source_ids().iter() {
         let confidence_threshold = app_config.source_confs()
             .get(source_id)
-            .expect("Source does not have confidence threshold setting");
+            .context("Source does not have confidence threshold setting")?;
         let inference_frame = app_config.source_inf_frames()
             .get(source_id)
-            .expect("Source does not have inference frame setting");
+            .context("Source does not have inference frame setting")?;
         
         // Start processor
         let processor = Arc::new(
@@ -42,7 +44,7 @@ pub async fn init_source_processors(app_config: &Config) -> Result<(), Error> {
         // Set in global variable
         PROCESSORS
             .write()
-            .unwrap()
+            .map_err(|_| anyhow::anyhow!(format!("Cannot set processor for source {}", source_id)))?
             .insert(source_id.clone(), processor);
     }
 
@@ -80,14 +82,11 @@ impl SourceProcessor {
         
         // Spawn dedicated thread for this source
         let process_source_id = source_id.clone();
-        let process_frames_total = frames_total.clone();
         let process_frames_success = frames_success.clone();
         let process_frames_failed = frames_failed.clone();
 
         let handle = tokio::spawn(async move {
             while let Some(frame) = rx.recv().await {
-                process_frames_total.fetch_add(1, Ordering::Relaxed);
-
                 let process_result = Self::process_frame_internal(
                     &process_source_id,
                     &frame,
@@ -135,7 +134,7 @@ impl SourceProcessor {
 
     pub fn process_frame(&self, raw_frame: &[u8], height: usize, width: usize) {
         // Send processing request to seperate thread
-        let frames_total = self.frames_total.load(Ordering::Relaxed);
+        let frames_total = self.frames_total.fetch_add(1, Ordering::Relaxed);
 
         // Send inference results on every N frame
         if frames_total % (self.inference_frame as u64) == 0 {
@@ -145,10 +144,7 @@ impl SourceProcessor {
                 width
             };
 
-            match self.frame_sender.send(frame) {
-                Ok(_) => tracing::info!("Frame sent successfully"),
-                Err(e) => tracing::error!("Failed to send frame: {}", e),
-            };
+            let _ = self.frame_sender.send(frame);
         }
     }
 
@@ -156,9 +152,9 @@ impl SourceProcessor {
         source_id: &str,
         frame: &InferenceFrame, 
         confidence_threshold: f32
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         // Perform inference on raw frame and populate results
-        let inference_model = inference::get_inference_model();
+        let inference_model = inference::get_inference_model()?;
         let inference_start = Instant::now();
 
         // Pre-process raw frame
@@ -166,14 +162,12 @@ impl SourceProcessor {
             frame,
             inference_model.input_shape(),
             inference_model.precision()
-        )
-            .unwrap();
+        )?;
         let pre_proc_time = inference_start.elapsed();
 
 
         // Perform inference on frame
-        let inference_results = inference_model.infer(&pre_proc_frame).await
-            .map_err(|e| Error::new(ErrorKind::Other, e))?;
+        let inference_results = inference_model.infer(&pre_proc_frame).await?;
         let inference_time = inference_start.elapsed() - pre_proc_time;
 
         // Post-process inference results
@@ -184,8 +178,7 @@ impl SourceProcessor {
             inference_model.precision(),
             confidence_threshold,
             inference_model.nms_iou_threshold()
-        )
-            .unwrap();
+        )?;
         let post_proc_time = inference_start.elapsed() - inference_time - pre_proc_time;
 
         // Populate inference results
@@ -205,10 +198,10 @@ impl SourceProcessor {
 
     pub fn populate_results(source_id: &str, bboxes: &[InferenceResult]) {
         // Populate results to third party stuff, e.g. Kafka
-        tracing::info!(
-            source_id=source_id,
-            bboxes=bboxes.len(),
-            "Got bboxes to populate!"
-        )
+        // tracing::info!(
+        //     source_id=source_id,
+        //     bboxes=bboxes.len(),
+        //     "Got bboxes to populate!"
+        // )
     }
 }
