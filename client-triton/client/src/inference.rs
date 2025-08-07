@@ -6,6 +6,45 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use serde_json::json;
 use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
+
+// Custom modules
+use crate::config::Config;
+
+// Static inference model
+pub static INFERENCE_MODEL: OnceLock<Arc<InferenceModel>> = OnceLock::new();
+pub fn get_inference_model() -> &'static Arc<InferenceModel> {
+    INFERENCE_MODEL
+        .get()
+        .expect("Infernece model is not initiated!")
+}
+pub async fn init_inference_model(app_config: &Config) -> Result<(), Error> {
+    // Create new instance
+    let client_instance = InferenceModel::new(
+        app_config.triton_url().to_string(),
+        app_config.model_name().to_string(), 
+        app_config.model_version().to_string(), 
+        app_config.model_input_name().to_string(), 
+        app_config.model_input_shape().clone(),
+        app_config.model_output_name().to_string(), 
+        app_config.model_output_shape().clone(),
+        app_config.model_precision(),
+        app_config.nms_iou_threshold()
+    )
+        .await
+        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+
+    // Initiate model instances
+    client_instance.load_model(app_config.source_ids().len())
+        .await
+        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+
+    // Set global variable
+    INFERENCE_MODEL.set(Arc::new(client_instance))
+        .map_err(|_| Error::new(ErrorKind::Other, "Model is already initiated"))?;
+
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub struct InferenceFrame {
@@ -50,6 +89,7 @@ pub struct InferenceResult {
 
 pub struct InferenceModel {
     client: Client,
+    triton_url: String,
     model_name: String,
     model_version: String,
     input_name: String,
@@ -63,6 +103,7 @@ pub struct InferenceModel {
 
 impl InferenceModel {
     pub async fn new(
+        triton_url: String,
         model_name: String, 
         model_version: String, 
         input_name: String, 
@@ -73,7 +114,7 @@ impl InferenceModel {
         nms_iou_threshold: f32
     ) -> Result<Self, Error> {
         //Create client instance
-        let client = Client::new("http://localhost:8001/", None).await
+        let client = Client::new(&triton_url, None).await
         .map_err(|e| Error::new(ErrorKind::ConnectionRefused, e))?;
 
         // Check if server is ready
@@ -113,6 +154,7 @@ impl InferenceModel {
 
         Ok(Self { 
             client,
+            triton_url,
             model_name,
             model_version,
             input_name,
@@ -134,7 +176,7 @@ impl InferenceModel {
                 {
                     "name": &self.input_name,
                     "data_type": format!("TYPE_{}", self.precision.to_string()),
-                    "dims": &self.output_shape
+                    "dims": &self.input_shape
                 }
             ],
             "output": [
@@ -181,16 +223,13 @@ impl InferenceModel {
                 {
                     "name": "warmup_random",
                     "batch_size": 10,
-                    "inputs": [
-                        {
-                            "key": self.input_name,
-                            "value": {
-                                "dims": &self.input_shape,
-                                "data_type": format!("TYPE_{}", self.precision.to_string()),
-                                "random_data": true
-                            }
+                    "inputs":  {
+                        &self.input_name: {
+                            "dims": &self.input_shape,
+                            "data_type": format!("TYPE_{}", self.precision.to_string()),
+                            "random_data": true
                         }
-                    ]
+                    }
                 }
             ]
         });
@@ -207,7 +246,7 @@ impl InferenceModel {
             model_name: self.model_name.clone(), 
             parameters: parameters
         }).await
-        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+            .map_err(|e| Error::new(ErrorKind::Other, e))?;
 
         Ok(())
     }
@@ -219,19 +258,35 @@ impl InferenceModel {
 
         // Perform inference
         let inference_result = self.client.model_infer(inference_request).await
-        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+            .map_err(|e| Error::new(ErrorKind::Other, e))?;
 
         // Return inference results
         Ok(
-            inference_result.raw_output_contents.into_iter().next()
-            .expect("Error getting inference results for image")
+            inference_result.raw_output_contents
+                .into_iter()
+                .next()
+                .expect("Error getting inference results for image")
         )
+    }
+
+    pub async fn is_alive(&self) -> bool {
+        let server_alive = &self.client.server_live().await;
+        
+        match server_alive {
+            Ok(response) => return response.live,
+            Err(_) => return false
+
+        }
     }
 }
 
 impl InferenceModel {
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    pub fn triton_url(&self) -> &str {
+        &self.triton_url
     }
 
     pub fn model_name(&self) -> &str {

@@ -1,18 +1,19 @@
 use std::io::{Error, ErrorKind};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use std::sync::atomic::{Ordering, AtomicU64};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
 // Custom modules
-use crate::inference::{InferenceModel, InferenceFrame};
-use crate::{processing, stream_client};
+use crate::inference::{self, InferenceFrame, InferenceResult};
+use crate::processing;
+use crate::config::Config;
 
 // Static source processors
 pub static PROCESSORS: Lazy<RwLock<HashMap<String, Arc<SourceProcessor>>>> = 
     Lazy::new(|| RwLock::new(HashMap::new()));
-fn get_source_processor(stream_id: &str) -> Arc<SourceProcessor> {
+pub fn get_source_processor(stream_id: &str) -> Arc<SourceProcessor> {
     PROCESSORS
         .read()
         .expect("Source processor is not initiated!")
@@ -20,13 +21,32 @@ fn get_source_processor(stream_id: &str) -> Arc<SourceProcessor> {
         .cloned()
         .expect("Error getting source processor")
 }
+pub async fn init_source_processors(app_config: &Config) -> Result<(), Error> {
+    for source_id in app_config.source_ids().iter() {
+        let confidence_threshold = app_config.source_confs()
+            .get(source_id)
+            .expect("Source does not have confidence threshold setting");
+        let inference_frame = app_config.source_inf_frames()
+            .get(source_id)
+            .expect("Source does not have inference frame setting");
+        
+        // Start processor
+        let processor = Arc::new(
+            SourceProcessor::new(
+                source_id.clone(), 
+                *confidence_threshold, 
+                *inference_frame
+            ).await
+        );
 
-// Static inference model
-pub static INFERENCE_MODEL: OnceLock<Arc<InferenceModel>> = OnceLock::new();
-fn get_inference_model() -> &'static Arc<InferenceModel> {
-    INFERENCE_MODEL
-        .get()
-        .expect("Infernece model is not initiated!")
+        // Set in global variable
+        PROCESSORS
+            .write()
+            .unwrap()
+            .insert(source_id.clone(), processor);
+    }
+
+    Ok(())
 }
 
 pub struct SourceProcessor {
@@ -40,38 +60,59 @@ pub struct SourceProcessor {
     inference_frame: usize,
 
     // Source statistics
-    frames_total: AtomicU64,
-    frames_success: AtomicU64,
-    frames_failed: AtomicU64
+    frames_total: Arc<AtomicU64>,
+    frames_success: Arc<AtomicU64>,
+    frames_failed: Arc<AtomicU64>
 }
 
 impl SourceProcessor {
-    pub fn new(
+    pub async fn new(
         source_id: String,
         confidence_threshold: f32,
         inference_frame: usize
     ) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<InferenceFrame>();
+
+        // Create global counters
+        let frames_total = Arc::new(AtomicU64::new(0));
+        let frames_success = Arc::new(AtomicU64::new(0));
+        let frames_failed = Arc::new(AtomicU64::new(0));
         
         // Spawn dedicated thread for this source
         let process_source_id = source_id.clone();
+        let process_frames_total = frames_total.clone();
+        let process_frames_success = frames_success.clone();
+        let process_frames_failed = frames_failed.clone();
+
         let handle = tokio::spawn(async move {
             while let Some(frame) = rx.recv().await {
+                process_frames_total.fetch_add(1, Ordering::Relaxed);
+
                 let process_result = Self::process_frame_internal(
                     &process_source_id,
                     &frame,
                     confidence_threshold
                 ).await;
 
-                if let Err(e) = process_result {
-                    tracing::error!(
-                        source_id=process_source_id,
-                        error=e.to_string(),
-                        "error processing source frame"
-                    )
+                match process_result {
+                    Ok(_) => {
+                        process_frames_success.fetch_add(1, Ordering::Relaxed);
+                    },
+                    Err(e) => {
+                        process_frames_failed.fetch_add(1, Ordering::Relaxed);
+
+                        tracing::error!(
+                            source_id=process_source_id,
+                            error=e.to_string(),
+                            "error processing source frame"
+                        )
+                    }
                 }
             }
         });
+
+        // Small yield to let task start
+        tokio::task::yield_now().await;
 
         tracing::info!(
             source_id=source_id,
@@ -86,15 +127,15 @@ impl SourceProcessor {
             confidence_threshold,
             inference_frame,
 
-            frames_total: AtomicU64::new(0),
-            frames_success: AtomicU64::new(0),
-            frames_failed: AtomicU64::new(0),
+            frames_total,
+            frames_success,
+            frames_failed,
         }
     }
 
     pub fn process_frame(&self, raw_frame: &[u8], height: usize, width: usize) {
         // Send processing request to seperate thread
-        let frames_total = self.frames_total.fetch_add(1, Ordering::Relaxed);
+        let frames_total = self.frames_total.load(Ordering::Relaxed);
 
         // Send inference results on every N frame
         if frames_total % (self.inference_frame as u64) == 0 {
@@ -104,7 +145,10 @@ impl SourceProcessor {
                 width
             };
 
-            let _ = self.frame_sender.send(frame);
+            match self.frame_sender.send(frame) {
+                Ok(_) => tracing::info!("Frame sent successfully"),
+                Err(e) => tracing::error!("Failed to send frame: {}", e),
+            };
         }
     }
 
@@ -114,7 +158,7 @@ impl SourceProcessor {
         confidence_threshold: f32
     ) -> Result<(), Error> {
         // Perform inference on raw frame and populate results
-        let inference_model = get_inference_model();
+        let inference_model = inference::get_inference_model();
         let inference_start = Instant::now();
 
         // Pre-process raw frame
@@ -144,17 +188,27 @@ impl SourceProcessor {
             .unwrap();
         let post_proc_time = inference_start.elapsed() - inference_time - pre_proc_time;
 
-        // Populate results to third party
-        stream_client::populate_results(&source_id, &bboxes);
+        // Populate inference results
+        SourceProcessor::populate_results(&source_id, &bboxes);
 
         tracing::info!(
             source_id=source_id,
             pre_processing=pre_proc_time.as_micros(),
             inference=inference_time.as_micros(),
             post_processing=post_proc_time.as_micros(),
+            total=inference_start.elapsed().as_micros(),
             "successful inference"
         );
 
         Ok(())
+    }
+
+    pub fn populate_results(source_id: &str, bboxes: &[InferenceResult]) {
+        // Populate results to third party stuff, e.g. Kafka
+        tracing::info!(
+            source_id=source_id,
+            bboxes=bboxes.len(),
+            "Got bboxes to populate!"
+        )
     }
 }
