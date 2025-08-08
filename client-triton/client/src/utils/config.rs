@@ -1,5 +1,5 @@
 use dotenvy::from_path;
-use std::path::Path;
+use std::path::{Path};
 use std::env;
 use std::process::Command;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -17,45 +17,57 @@ pub enum Environment {
 }
 
 #[derive(Debug)]
-pub struct Config {
+pub struct AppConfig {
     local: bool,
     environment: Environment,
+    gpu_name: String,
     source_ids: Vec<String>,
     source_confs: HashMap<String, f32>,
     source_conf_default: f32,
     source_inf_frames: HashMap<String, usize>,
     source_inf_frame_default: usize,
     triton_url: String,
+    triton_models_dir: String,
     model_name: String,
     model_version: String,
     model_input_name: String,
     model_input_shape: [i64; 3],
     model_output_name: String,
     model_output_shape: [i64; 2],
+    model_precision: InferencePrecision,
     nms_iou_threshold: f32,
     nms_conf_thrershold: f32,
-    model_precision: InferencePrecision
+    s3_access_key: String,
+    s3_secret_key: String,
+    s3_endpoint: String,
+    s3_region: String,
+    s3_models_bucket: String,
+    s3_model_path: String
 }
 
-impl Config {
+impl AppConfig {
     pub fn new(local: bool, environment: Environment) -> Result<Self> {
         // Load variables from local env file
         if local {
-            Config::load_env_file(environment)?;
+            AppConfig::load_env_file(environment)?;
         }
 
         // Initiate app logging
-        Config::init_logging();
+        AppConfig::init_logging();
+
+        // GPU information
+        let gpu_name = AppConfig::get_gpu()
+            .context("Error getting GPU name")?;
 
         // Streams
-        let source_ids: Vec<String> = Config::parse_list(
+        let source_ids: Vec<String> = AppConfig::parse_list(
             &env::var("SOURCE_IDS")
             .context("SOURCES_IDS variable not found")?
         );
 
         // Append confidence threshold for each source
         // Check if source has a prefrred setting and assign default value if not
-        let mut source_confs: HashMap<String, f32> = Config::parse_key_values(
+        let mut source_confs: HashMap<String, f32> = AppConfig::parse_key_values(
             &env::var("SOURCE_CONFS")
             .context("SOURCES_IDS variable not found")?
         );
@@ -80,7 +92,7 @@ impl Config {
 
         // Append setting for what frame we want to send inference on for each source
         // Check if source has a prefrred setting and assign default value if not
-        let mut source_inf_frames: HashMap<String, usize> = Config::parse_key_values(
+        let mut source_inf_frames: HashMap<String, usize> = AppConfig::parse_key_values(
             &env::var("SOURCE_INF_FRAMES")
             .context("SOURCE_INF_FRAMES variable not found")?
         );
@@ -106,6 +118,8 @@ impl Config {
         // Inference model
         let triton_url = env::var("TRITON_URL")
             .context("TRITON_URL variable not found")?;
+        let triton_models_dir = env::var("TRITON_MODELS_DIR")
+            .context("TRITON_MODELS_DIR variable not found")?;
         let model_name = env::var("MODEL_NAME")
             .context("MODEL_NAME variable not found")?;
         let model_version = env::var("MODEL_VERSION")
@@ -120,7 +134,7 @@ impl Config {
             .context("Must be valid precision")?;
 
         // Model input
-        let model_input_shape: Vec<i64> = Config::parse_list(
+        let model_input_shape: Vec<i64> = AppConfig::parse_list(
             &env::var("MODEL_INPUT_SHAPE")
             .context("MODEL_INPUT_SHAPE variable not found")?
         );
@@ -129,7 +143,7 @@ impl Config {
             .map_err(|_| anyhow::anyhow!("Input must be exactly 3 in length (e.g. 3, 640, 640)"))?;
 
         // Model output
-        let model_output_shape: Vec<i64> = Config::parse_list(
+        let model_output_shape: Vec<i64> = AppConfig::parse_list(
             &env::var("MODEL_OUTPUT_SHAPE")
             .context("MODEL_OUTPUT_SHAPE variable not found")?
         );
@@ -148,15 +162,31 @@ impl Config {
             .parse()
             .context("NMS_CONF_THRESHOLD must be a float")?;
 
+        // S3 information
+        let s3_access_key = env::var("S3_ACCESS_KEY")
+            .context("S3_ACCESS_KEY variable not found")?;
+        let s3_secret_key = env::var("S3_SECRET_KEY")
+            .context("S3_SECRET_KEY variable not found")?;
+        let s3_endpoint = env::var("S3_ENDPOINT")
+            .context("S3_ENDPOINT variable not found")?;
+        let s3_region = env::var("S3_REGION")
+            .context("S3_REGION variable not found")?;
+        let s3_models_bucket = env::var("S3_MODELS_BUCKET")
+            .context("S3_MODELS_BUCKET variable not found")?;
+        let s3_model_path = env::var("S3_MODEL_PATH")
+            .context("S3_MODEL_PATH variable not found")?;
+
         Ok(Self {
             local,
             environment,
+            gpu_name,
             source_ids,
             source_confs,
             source_conf_default,
             source_inf_frames,
             source_inf_frame_default,
             triton_url,
+            triton_models_dir,
             model_name,
             model_version,
             model_input_name,
@@ -165,7 +195,13 @@ impl Config {
             model_output_shape,
             model_precision,
             nms_iou_threshold,
-            nms_conf_thrershold
+            nms_conf_thrershold,
+            s3_access_key,
+            s3_secret_key,
+            s3_endpoint,
+            s3_region,
+            s3_models_bucket,
+            s3_model_path
         })
     }
 
@@ -178,7 +214,7 @@ impl Config {
             Environment::NonProduction => ".env_test"
         };
 
-        let env_path = base_dir.join(format!("./secrets/{}", env_file))
+        let env_path = base_dir.join(format!("../secrets/{}", env_file))
             .canonicalize()
             .context("Local environment variable not found!")?;
         
@@ -201,13 +237,19 @@ impl Config {
 
     fn get_gpu() -> Result<String> {
         let output = Command::new("nvidia-smi")
-            .args(&["--query-gpu=name", "--format=csv,noheader"])
+            .args(&["--query-gpu=name", "--format=csv,noheader", "--id=0"])
             .output()
             .context("failed to execute nvidia-smi")?;
 
+        if !output.status.success() {
+            anyhow::bail!("GPU ID 0 not found")
+        }
+
         Ok(
-            String::from_utf8_lossy(&output.stdout)
-                .to_string()
+            String::from_utf8(output.stdout)
+            .context("Cannot parse GPU name")?
+            .trim()
+            .to_string()
         )
     }
 
@@ -242,13 +284,17 @@ impl Config {
     }
 }
 
-impl Config {
+impl AppConfig {
     pub fn is_local(&self) -> bool {
         self.local
     }
 
     pub fn environment(&self) -> Environment {
         self.environment
+    }
+
+    pub fn gpu_name(&self) -> &str {
+        &self.gpu_name
     }
 
     pub fn source_ids(&self) -> &Vec<String> {
@@ -275,6 +321,10 @@ impl Config {
         &self.triton_url
     }
 
+    pub fn triton_models_dir(&self) -> &str {
+        &self.triton_models_dir
+    }
+
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
@@ -299,6 +349,10 @@ impl Config {
         &self.model_output_shape
     }
 
+    pub fn model_precision(&self) -> InferencePrecision {
+        self.model_precision
+    }
+
     pub fn nms_iou_threshold(&self) -> f32 {
         self.nms_iou_threshold
     }
@@ -307,7 +361,27 @@ impl Config {
         self.nms_conf_thrershold
     }
 
-    pub fn model_precision(&self) -> InferencePrecision {
-        self.model_precision
+    pub fn s3_access_key(&self) -> &str {
+        &self.s3_access_key
+    }
+
+    pub fn s3_secret_key(&self) -> &str {
+        &self.s3_secret_key
+    }
+
+    pub fn s3_endpoint(&self) -> &str {
+        &self.s3_endpoint
+    }
+
+    pub fn s3_region(&self) -> &str {
+        &self.s3_region
+    }
+
+    pub fn s3_models_bucket(&self) -> &str {
+        &self.s3_models_bucket
+    }
+
+    pub fn s3_model_path(&self) -> &str {
+        &self.s3_model_path
     }
 }

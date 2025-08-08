@@ -1,5 +1,11 @@
+///! Responsible for performing inference with Nvidia Triton Server
+///! 
+///! Performs operations using gRPC protocol for minimal latency between
+///! our application and Triton Server.
+///! Allows us to dynamically load models(multiple instances) depending on amount of video sources we have
+
 use triton_client::Client;
-use triton_client::inference::{ModelInferRequest, RepositoryModelLoadRequest, ModelRepositoryParameter};
+use triton_client::inference::{ModelInferRequest, RepositoryModelLoadRequest, ModelRepositoryParameter, RepositoryModelUnloadRequest};
 use triton_client::inference::model_infer_request::{InferInputTensor, InferRequestedOutputTensor};
 use triton_client::inference::model_repository_parameter::{ParameterChoice};
 use std::collections::HashMap;
@@ -7,9 +13,70 @@ use serde_json::json;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use anyhow::{self, Result, Context};
+use std::fs;
+use std::path::{PathBuf};
 
 // Custom modules
-use crate::config::Config;
+use crate::utils::config::AppConfig;
+use crate::utils::s3::S3Client;
+pub mod processing;
+pub mod source;
+
+/// Downloads model from S3 to local machine
+pub async fn load_inference_model(app_config: &AppConfig) -> Result<()> {
+    // Initiate S3 client
+    let s3_client = S3Client::new(
+        app_config.s3_access_key().to_string(),
+        app_config.s3_secret_key().to_string(),
+        app_config.s3_endpoint().to_string(),
+        app_config.s3_region().to_string()
+    );
+
+    // Remove model if already exists in path
+    let model_dir_path_buf = PathBuf::from(format!(
+        "{}/{}",
+        app_config.triton_models_dir(),
+        app_config.model_name()
+    ));
+    let model_dir_path = model_dir_path_buf
+        .to_string_lossy()
+        .to_string();
+
+    if let Ok(_) = fs::remove_dir_all(&model_dir_path) {
+        tracing::warn!("Removed previous model directory")
+    }
+
+    // Create model path based on parameters
+    let model_plan_buf = PathBuf::from(format!(
+        "{}/{}/model.plan", 
+        model_dir_path,
+        app_config.model_version()
+    ));
+    let model_plan = model_plan_buf
+        .to_string_lossy()
+        .to_string();
+
+    // Download model for triton to use
+    let model_s3_buf = PathBuf::from(format!(
+        "{}/{}", 
+        app_config.gpu_name(),
+        app_config.s3_model_path()
+    ));
+    let model_s3 = model_s3_buf
+        .to_string_lossy()
+        .to_string();
+
+    s3_client.download_s3_file(
+        &app_config.s3_models_bucket(), 
+        &model_s3, 
+        &model_plan
+    ).await
+        .context("Error downloading model from S3")?;
+
+    tracing::info!("Successfully downloaded model instance from S3");
+
+    Ok(())
+}
 
 // Static inference model
 pub static INFERENCE_MODEL: OnceLock<Arc<InferenceModel>> = OnceLock::new();
@@ -20,7 +87,9 @@ pub fn get_inference_model() -> Result<&'static Arc<InferenceModel>> {
             .context("Infernece model is not initiated!")?
     )
 }
-pub async fn init_inference_model(app_config: &Config) -> Result<()> {
+
+/// Initiates a single instance of a model for inference
+pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
     if let Ok(_) = get_inference_model() {
         anyhow::bail!("Model is already initiated!")
     }
@@ -40,9 +109,13 @@ pub async fn init_inference_model(app_config: &Config) -> Result<()> {
         .await
         .context("Error creating model instance")?;
 
+    // Clear previous model instances
+    if let Ok(_) = client_instance.unload_model().await {
+        tracing::warn!("Unloaded previous model instances")
+    }
+
     // Initiate model instances
-    client_instance.load_model(app_config.source_ids().len())
-        .await
+    client_instance.load_model(app_config.source_ids().len()).await
         .context("Error loading model instances")?;
 
     // Set global variable
@@ -175,6 +248,22 @@ impl InferenceModel {
         })
     }
 
+    /// Unloads running instances of a given model
+    pub async fn unload_model(&self) -> Result<()> {
+        // Unload previous instances of model we're about to load
+        self.client.repository_model_unload(RepositoryModelUnloadRequest { 
+            repository_name: "".to_string(), 
+            model_name: self.model_name.clone(), 
+            parameters: HashMap::new()
+        })
+            .await
+            .context("Error unloading previous triton model instances")?;
+
+        Ok(())
+    }
+
+
+    // Loads given amount of instances of a given model
     pub async fn load_model(&self, instances: usize) -> Result<()> {
         let model_config = json!({
             "name": self.model_name,
@@ -260,6 +349,7 @@ impl InferenceModel {
         Ok(())
     }
 
+    /// Performs inference on a raw image, returning raw model results
     pub async fn infer(&self, image: &[u8]) -> Result<Vec<u8>> {
         // Create new inference request
         let mut inference_request = self.base_request.clone();
@@ -279,6 +369,7 @@ impl InferenceModel {
         )
     }
 
+    /// Get Triton Server alive status
     pub async fn is_alive(&self) -> bool {
         let server_alive = &self.client.server_live().await;
         
