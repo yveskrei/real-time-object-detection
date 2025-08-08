@@ -1,6 +1,10 @@
 use image::{ImageReader, GenericImageView};
 use anyhow::{Result, Context};
 
+// Custom modules
+pub mod config;
+pub mod s3;
+
 pub fn get_image_raw(path: &str) -> Result<(Vec<u8>, usize, usize)> {
     let image = ImageReader::open(path)
         .context("Error opening image from path")?

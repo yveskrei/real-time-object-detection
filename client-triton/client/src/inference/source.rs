@@ -7,10 +7,10 @@ use anyhow::{Result, Context};
 
 // Custom modules
 use crate::inference::{self, InferenceFrame, InferenceResult};
-use crate::processing;
-use crate::config::Config;
+use crate::inference::processing;
+use crate::utils::config::AppConfig;
 
-// Static source processors
+/// Holds source processors at global scope
 pub static PROCESSORS: Lazy<RwLock<HashMap<String, Arc<SourceProcessor>>>> = 
     Lazy::new(|| RwLock::new(HashMap::new()));
 pub fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
@@ -23,7 +23,7 @@ pub fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
         .context("Error getting source processor")?
     )
 }
-pub async fn init_source_processors(app_config: &Config) -> Result<()> {
+pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
     for source_id in app_config.source_ids().iter() {
         let confidence_threshold = app_config.source_confs()
             .get(source_id)
@@ -51,9 +51,18 @@ pub async fn init_source_processors(app_config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Responsible for managing inference/processing for each source
+/// 
+/// Performs inference for each source seperately. Allows us to control 
+/// each source seperately, with various settings, such as:
+/// 1. confidence_threshold: What confidence threshold we apply to results for this specific source.
+/// Especially relevant in case this source is known as more problematic and requires higher confidence
+/// 2. inference_frame: How many frames we want to skip before performing inference. In other words, 
+/// "Inference on every N frame". This allows us to skip inference on frames when source has higher frame
+/// rate, having minimal effect on the end user's experience.
 pub struct SourceProcessor {
     // Settings for multi-threading
-    frame_sender: tokio::sync::mpsc::UnboundedSender<InferenceFrame>,
+    frame_sender: tokio::sync::mpsc::Sender<InferenceFrame>,
     _handle: tokio::task::JoinHandle<()>,
 
     // Source specific settings
@@ -73,7 +82,8 @@ impl SourceProcessor {
         confidence_threshold: f32,
         inference_frame: usize
     ) -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<InferenceFrame>();
+        // Set inference queue to 10 frames. it will fail adding when sending more
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<InferenceFrame>(10);
 
         // Create global counters
         let frames_total = Arc::new(AtomicU64::new(0));
@@ -144,7 +154,18 @@ impl SourceProcessor {
                 width
             };
 
-            let _ = self.frame_sender.send(frame);
+            match self.frame_sender.try_send(frame) {
+                Err(e) => {
+                    self.frames_failed.fetch_add(1, Ordering::Relaxed);
+
+                    tracing::error!(
+                        source_id=&self.source_id,
+                        error=e.to_string(),
+                        "frame queue is full"
+                    )
+                },
+                Ok(_) => ()
+            }
         }
     }
 
@@ -182,7 +203,7 @@ impl SourceProcessor {
         let post_proc_time = inference_start.elapsed() - inference_time - pre_proc_time;
 
         // Populate inference results
-        SourceProcessor::populate_results(&source_id, &bboxes);
+        //SourceProcessor::populate_results(&source_id, &bboxes);
 
         tracing::info!(
             source_id=source_id,
@@ -198,10 +219,10 @@ impl SourceProcessor {
 
     pub fn populate_results(source_id: &str, bboxes: &[InferenceResult]) {
         // Populate results to third party stuff, e.g. Kafka
-        // tracing::info!(
-        //     source_id=source_id,
-        //     bboxes=bboxes.len(),
-        //     "Got bboxes to populate!"
-        // )
+        tracing::info!(
+            source_id=source_id,
+            bboxes=bboxes.len(),
+            "Got bboxes to populate!"
+        )
     }
 }

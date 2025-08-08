@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 dotenvy = "0.15"
-tokio = { version = "1.47.0", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1.47.0", features = ["full"] }
 serde_json = "1.0.141"
 image = "0.25.6"
 triton-client = "0.2.0"
@@ -13,3 +13,5 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter", "time"] }
 once_cell = "1.21.3"
 anyhow = "1.0.98"
+aws-sdk-s3 = { version = "1.101.0", features = ["behavior-version-latest"] }
+aws-config = { version = "1.8.4", features = ["behavior-version-latest"] }

@@ -1,59 +1,102 @@
+//! Responsible for pre/post processing images before inference.
+//! Performs operations on raw frames/inference results
+
 use std::sync::OnceLock;
 use anyhow::{Result};
 
 // Custom modules
 use crate::inference::{InferencePrecision, InferenceResult, InferenceFrame};
 
-// Thread-safe immutable lookup table for f16 to f32 conversion
-static F16_TO_F32_LUT: OnceLock<Box<[f32; 65536]>> = OnceLock::new();
+// Initiate all thread safe lookup tables
+pub static F16_TO_F32_LUT: OnceLock<Box<[f32; 65536]>> = OnceLock::new();
+pub static F16_LUT: OnceLock<Box<[u16; 256]>> = OnceLock::new();
+pub static F32_LUT: OnceLock<Box<[f32; 256]>> = OnceLock::new();
 
-fn get_f16_lut() -> &'static [f32; 65536] {
-    F16_TO_F32_LUT.get_or_init(|| {
-        let mut lut = Box::new([0.0f32; 65536]);
+// F16 TO F32
+fn create_f16_to_f32_lut() -> Box<[f32; 65536]> {
+    let mut lut = Box::new([0.0f32; 65536]);
         
-        for i in 0u16..=65535 {
-            let sign = (i >> 15) & 0x1;
-            let exp = (i >> 10) & 0x1f;
-            let frac = i & 0x3ff;
-            
-            lut[i as usize] = if exp == 0 {
-                if frac == 0 {
-                    if sign == 1 { -0.0 } else { 0.0 }
-                } else {
-                    // Denormal
-                    let mut val = frac as f32 / 1024.0 / 16384.0;
-                    if sign == 1 { val = -val; }
-                    val
-                }
-            } else if exp == 31 {
-                // Infinity or NaN
-                if frac == 0 {
-                    if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
-                } else {
-                    f32::NAN
-                }
+    for i in 0u16..=65535 {
+        let sign = (i >> 15) & 0x1;
+        let exp = (i >> 10) & 0x1f;
+        let frac = i & 0x3ff;
+        
+        lut[i as usize] = if exp == 0 {
+            if frac == 0 {
+                if sign == 1 { -0.0 } else { 0.0 }
             } else {
-                // Normal numbers
-                let exp_f32 = (exp as i32 - 15 + 127) as u32;
-                let frac_f32 = (frac as u32) << 13;
-                let bits = (sign as u32) << 31 | exp_f32 << 23 | frac_f32;
-                f32::from_bits(bits)
-            };
-        }
-        
-        lut
-    })
-}
-
-// Inline f16 lookup - single memory access, no computation
-#[inline(always)]
-fn f16_to_f32_fast(val: u16) -> f32 {
-    unsafe {
-        *get_f16_lut().get_unchecked(val as usize)
+                // Denormal
+                let mut val = frac as f32 / 1024.0 / 16384.0;
+                if sign == 1 { val = -val; }
+                val
+            }
+        } else if exp == 31 {
+            // Infinity or NaN
+            if frac == 0 {
+                if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
+            } else {
+                f32::NAN
+            }
+        } else {
+            // Normal numbers
+            let exp_f32 = (exp as i32 - 15 + 127) as u32;
+            let frac_f32 = (frac as u32) << 13;
+            let bits = (sign as u32) << 31 | exp_f32 << 23 | frac_f32;
+            f32::from_bits(bits)
+        };
     }
+    
+    lut
+}
+fn get_f16_to_f32_lut(val: u16) -> f32 {
+    F16_TO_F32_LUT
+        .get_or_init(create_f16_to_f32_lut)[val as usize]
 }
 
-// Precompute letterbox params struct for better cache locality
+// F16 LUT
+fn create_f16_lut() -> Box<[u16; 256]> {
+    let mut lut = Box::new([0u16; 256]);
+    for i in 0..256 {
+        let normalized = i as f32 / 255.0;
+        let bits = normalized.to_bits();
+        let sign = (bits >> 16) & 0x8000;
+        let exp = ((bits >> 23) & 0xff) as i32;
+        let mantissa = bits & 0x7fffff;
+        lut[i] = if exp == 0 {
+            sign as u16
+        } else {
+            let exp_adj = exp - 127 + 15;
+            if exp_adj >= 31 {
+                (sign | 0x7c00) as u16
+            } else if exp_adj <= 0 {
+                sign as u16
+            } else {
+                let mantissa_adj = mantissa >> 13;
+                (sign | ((exp_adj as u32) << 10) | mantissa_adj) as u16
+            }
+        };
+    }
+    lut
+}
+fn get_f16_lut() -> &'static [u16; 256] {
+    F16_LUT
+        .get_or_init(create_f16_lut)
+}
+
+// F32 LUT
+fn create_f32_lut() -> Box<[f32; 256]> {
+    let mut lut = Box::new([0.0f32; 256]);
+    for i in 0..256 {
+        lut[i] = i as f32 / 255.0;
+    }
+    lut
+}
+
+fn get_f32_lut() -> &'static [f32; 256] {
+    F32_LUT
+        .get_or_init(create_f32_lut)
+}
+
 #[derive(Copy, Clone)]
 struct LetterboxParams {
     pad_x: f32,
@@ -61,7 +104,6 @@ struct LetterboxParams {
     inv_scale: f32,
 }
 
-#[inline(always)]
 fn calculate_letterbox_fast(height: usize, width: usize) -> LetterboxParams {
     const TARGET_SIZE: f32 = 640.0;
     const TARGET_SIZE_HALF: f32 = 320.0;
@@ -77,9 +119,8 @@ fn calculate_letterbox_fast(height: usize, width: usize) -> LetterboxParams {
     }
 }
 
-// Optimized NMS with early exit and better memory access patterns
 #[inline(never)] // Don't inline to keep instruction cache hot for main loop
-fn bbox_nms_fast(detections: &mut Vec<InferenceResult>, nms_threshold: f32) {
+fn bbox_nms(detections: &mut Vec<InferenceResult>, nms_threshold: f32) {
     let len = detections.len();
     if len <= 1 {
         return;
@@ -138,6 +179,16 @@ fn bbox_nms_fast(detections: &mut Vec<InferenceResult>, nms_threshold: f32) {
     detections.truncate(write_idx);
 }
 
+/// Performs post-processing on inference results for YOLO models
+/// 
+/// Including the following steps of processing:
+/// 1. Convert BBOX coordinates from (x, y, w, h) to (x1, y1, x2, y2) together
+/// with restoring the letterbox padding applied during pre-processing
+/// 2. Finds out the class id with the max probability - making it the 
+/// class for the bbox along with its probabiliy
+/// 3. Filter BBOXes on a given confidence threshold, before applying NMS(boosts performance significantly)
+/// 4. Perform NMS on left over BBOXes
+
 pub fn postprocess_yolo(
     results: &[u8],
     original_frame: &InferenceFrame,
@@ -146,9 +197,6 @@ pub fn postprocess_yolo(
     pred_conf_threshold: f32,
     nms_iou_threshold: f32,
 ) -> Result<Vec<InferenceResult>> {
-    // Initialize LUT once (thread-safe)
-    get_f16_lut();
-    
     let target_features = output_shape[0] as usize;
     let target_anchors = output_shape[1] as usize;
     let target_classes = target_features - 4;
@@ -192,10 +240,10 @@ pub fn postprocess_yolo(
             for anchor_idx in 0..target_anchors {
                 unsafe {
                     // Load all bbox values at once for better cache usage
-                    let x = f16_to_f32_fast(*u16_data.get_unchecked(anchor_idx));
-                    let y = f16_to_f32_fast(*u16_data.get_unchecked(stride1 + anchor_idx));
-                    let w = f16_to_f32_fast(*u16_data.get_unchecked(stride2 + anchor_idx));
-                    let h = f16_to_f32_fast(*u16_data.get_unchecked(stride3 + anchor_idx));
+                    let x = get_f16_to_f32_lut(*u16_data.get_unchecked(anchor_idx));
+                    let y = get_f16_to_f32_lut(*u16_data.get_unchecked(stride1 + anchor_idx));
+                    let w = get_f16_to_f32_lut(*u16_data.get_unchecked(stride2 + anchor_idx));
+                    let h = get_f16_to_f32_lut(*u16_data.get_unchecked(stride3 + anchor_idx));
                     
                     // Fused bbox transformation
                     let half_w = w * 0.5;
@@ -220,10 +268,10 @@ pub fn postprocess_yolo(
                             let idx2 = class_base + (class_idx + 2) * stride1;
                             let idx3 = class_base + (class_idx + 3) * stride1;
                             
-                            let s0 = f16_to_f32_fast(*u16_data.get_unchecked(idx0));
-                            let s1 = f16_to_f32_fast(*u16_data.get_unchecked(idx1));
-                            let s2 = f16_to_f32_fast(*u16_data.get_unchecked(idx2));
-                            let s3 = f16_to_f32_fast(*u16_data.get_unchecked(idx3));
+                            let s0 = get_f16_to_f32_lut(*u16_data.get_unchecked(idx0));
+                            let s1 = get_f16_to_f32_lut(*u16_data.get_unchecked(idx1));
+                            let s2 = get_f16_to_f32_lut(*u16_data.get_unchecked(idx2));
+                            let s3 = get_f16_to_f32_lut(*u16_data.get_unchecked(idx3));
                             
                             if s0 > max_score { max_score = s0; max_class = class_idx; }
                             if s1 > max_score { max_score = s1; max_class = class_idx + 1; }
@@ -234,7 +282,7 @@ pub fn postprocess_yolo(
                         // Generic path for other class counts
                         for class_idx in 0..target_classes {
                             let prob_idx = class_base + class_idx * stride1;
-                            let score = f16_to_f32_fast(*u16_data.get_unchecked(prob_idx));
+                            let score = get_f16_to_f32_lut(*u16_data.get_unchecked(prob_idx));
                             if score > max_score {
                                 max_score = score;
                                 max_class = class_idx;
@@ -329,57 +377,21 @@ pub fn postprocess_yolo(
     
     // Fast NMS only if needed
     if detections.len() > 1 {
-        bbox_nms_fast(&mut detections, nms_iou_threshold);
+        bbox_nms(&mut detections, nms_iou_threshold);
     }
     
     Ok(detections)
 }
 
-// Cache-aligned LUTs - these are IMMUTABLE and thread-safe
-#[repr(align(64))]
-struct AlignedF16Lut([u16; 256]);
+/// Performs pre-processing on raw RGB frame for YOLO models
+/// 
+/// Performs the following steps of processing:
+/// 1. Resizes the given image to 640x640 while preserving aspect ratio.
+/// Applying letterbox padding to complete the missing pixels for certain aspect ratios.
+/// 2. Normalizes pixels from 0-255 to 0-1
+/// 3. Converting raw pixel values to required precision datatype
+/// 4. Outputs raw bytes ordered by color channels: \[RRRBBBGGG\]
 
-#[repr(align(64))]
-struct AlignedF32Lut([f32; 256]);
-
-static F16_LUT: AlignedF16Lut = AlignedF16Lut({
-    let mut lut = [0u16; 256];
-    let mut i = 0;
-    while i < 256 {
-        let normalized = i as f32 / 255.0;
-        let bits = normalized.to_bits();
-        let sign = (bits >> 16) & 0x8000;
-        let exp = ((bits >> 23) & 0xff) as i32;
-        let mantissa = bits & 0x7fffff;
-        lut[i] = if exp == 0 {
-            sign as u16
-        } else {
-            let exp_adj = exp - 127 + 15;
-            if exp_adj >= 31 {
-                (sign | 0x7c00) as u16
-            } else if exp_adj <= 0 {
-                sign as u16
-            } else {
-                let mantissa_adj = mantissa >> 13;
-                (sign | ((exp_adj as u32) << 10) | mantissa_adj) as u16
-            }
-        };
-        i += 1;
-    }
-    lut
-});
-
-static F32_LUT: AlignedF32Lut = AlignedF32Lut({
-    let mut lut = [0.0f32; 256];
-    let mut i = 0;
-    while i < 256 {
-        lut[i] = i as f32 / 255.0;
-        i += 1;
-    }
-    lut
-});
-
-// THREAD-SAFE version - no global mutable state!
 pub fn preprocess_yolo(
     frame: &InferenceFrame,
     input_shape: &[i64; 3],
@@ -429,7 +441,7 @@ pub fn preprocess_yolo(
     match precision {
         InferencePrecision::FP16 => {
             // Direct byte allocation - no transmute needed
-            let gray_val = F16_LUT.0[114];
+            let gray_val = get_f16_lut()[114];
             let gray_bytes: [u8; 2] = unsafe { std::mem::transmute(gray_val) };
             
             let mut output: Vec<u8> = Vec::with_capacity(target_pixels * 6);
@@ -461,7 +473,7 @@ pub fn preprocess_yolo(
             unsafe {
                 let img_ptr = frame.data.as_ptr();
                 let out_ptr = output.as_mut_ptr() as *mut u16;
-                let lut = F16_LUT.0.as_ptr();
+                let lut = get_f16_lut().as_ptr();
                 
                 for y in 0..new_height {
                     let src_row = y_src_offsets[y];
@@ -525,7 +537,7 @@ pub fn preprocess_yolo(
         }
         InferencePrecision::FP32 => {
             // Direct byte allocation
-            let gray_val = F32_LUT.0[114];
+            let gray_val = get_f32_lut()[114];
             let gray_bytes: [u8; 4] = unsafe { std::mem::transmute(gray_val) };
             
             let mut output: Vec<u8> = Vec::with_capacity(target_pixels * 12);
@@ -564,7 +576,7 @@ pub fn preprocess_yolo(
             unsafe {
                 let img_ptr = frame.data.as_ptr();
                 let out_ptr = output.as_mut_ptr() as *mut f32;
-                let lut = F32_LUT.0.as_ptr();
+                let lut = get_f32_lut().as_ptr();
                 
                 for y in 0..new_height {
                     let src_row = y_src_offsets[y];
