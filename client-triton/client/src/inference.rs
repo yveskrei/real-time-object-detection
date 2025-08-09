@@ -11,16 +11,19 @@ use triton_client::inference::model_repository_parameter::{ParameterChoice};
 use std::collections::HashMap;
 use serde_json::json;
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 use anyhow::{self, Result, Context};
 use std::fs;
-use std::path::{PathBuf};
+use std::path::PathBuf;
+use tokio::time::{Duration, interval, Instant};
 
 // Custom modules
 use crate::utils::config::AppConfig;
 use crate::utils::s3::S3Client;
 pub mod processing;
 pub mod source;
+use crate::utils;
 
 /// Downloads model from S3 to local machine
 pub async fn load_inference_model(app_config: &AppConfig) -> Result<()> {
@@ -78,8 +81,10 @@ pub async fn load_inference_model(app_config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-// Static inference model
-pub static INFERENCE_MODEL: OnceLock<Arc<InferenceModel>> = OnceLock::new();
+/// Static singleton instance for model inference
+pub static INFERENCE_MODEL: OnceCell<Arc<InferenceModel>> = OnceCell::const_new();
+
+/// Returns the inference model instance, if initiated
 pub fn get_inference_model() -> Result<&'static Arc<InferenceModel>> {
     Ok(
         INFERENCE_MODEL
@@ -125,14 +130,17 @@ pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug)]
+/// Represents raw frame before performing inference on it
+#[derive(Clone)]
 pub struct InferenceFrame {
     pub data: Vec<u8>,
     pub height: usize,
-    pub width: usize
+    pub width: usize,
+    pub added: Instant
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+/// Represents the inference model precision type
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum InferencePrecision {
     FP32,
     FP16
@@ -159,13 +167,29 @@ impl FromStr for InferencePrecision {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Represents a single bbox instance from the model inference results
+#[derive(Clone, Copy)]
 pub struct InferenceResult {
     pub bbox: [f32; 4],
     pub class: usize, 
     pub score: f32
 }
 
+impl InferenceResult {
+    pub fn class_name(&self) -> &'static str {
+        match self.class {
+            0 => "person",
+            1 => "bicycle",
+            2 => "car",
+            3 => "motorcycle",
+            4 => "airplane",
+            5 => "bus",
+            _ => Box::leak(self.class.to_string().into_boxed_str())
+        }
+    }
+}
+
+/// Represents an instance of an inference model
 pub struct InferenceModel {
     client: Client,
     triton_url: String,
@@ -177,10 +201,16 @@ pub struct InferenceModel {
     output_shape: [i64; 2],
     precision: InferencePrecision,
     nms_iou_threshold: f32,
-    base_request: ModelInferRequest
+    base_request: ModelInferRequest,
+    _stats_handle: tokio::task::JoinHandle<()>
 }
 
 impl InferenceModel {
+    /// Create new instance of inference model
+    /// 
+    /// Creates a new Triton Server client for inference
+    /// Initiate all values for fast inference, including a pre-made request body for inference
+    /// Reports statistics about GPU utilization
     pub async fn new(
         triton_url: String,
         model_name: String, 
@@ -233,6 +263,55 @@ impl InferenceModel {
             raw_input_contents: vec![]
         };
 
+
+        // Spawn seperate task to monitor GPU stats
+        let stats_interval = Duration::from_secs(5);
+        let stats_handle = tokio::spawn(async move {
+            let mut interval = interval(stats_interval);
+            
+            loop {
+                interval.tick().await;
+                
+                // NVML Is execution blocking, running it seperately
+                let gpu_stats = tokio::task::spawn_blocking(|| {
+                    utils::get_gpu_statistics()
+                }).await;
+
+                match gpu_stats {
+                    Ok(result) => {
+                        match result {
+                            Ok(stats) => {
+                                tracing::info!(
+                                    name=stats.name,
+                                    uuid=stats.uuid,
+                                    serial=stats.serial,
+                                    memory_total_mb=stats.memory_total,
+                                    memory_used_mb=stats.memory_used,
+                                    memory_free_mb=stats.memory_free,
+                                    util_perc=stats.util_perc,
+                                    memory_perc=stats.memory_perc,
+                                    "GPU utilization information"
+                                );
+                            },
+                            Err(e) => {
+                                tracing::warn!(
+                                    error=e.to_string(),
+                                    "Error getting GPU utilization information"
+                                )
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            error=e.to_string(),
+                            "Error getting GPU utilization information"
+                        )
+                    }
+                };
+
+            }
+        });
+
         Ok(Self { 
             client,
             triton_url,
@@ -244,7 +323,8 @@ impl InferenceModel {
             output_shape,
             precision,
             nms_iou_threshold,
-            base_request
+            base_request,
+            _stats_handle: stats_handle
         })
     }
 
@@ -262,8 +342,7 @@ impl InferenceModel {
         Ok(())
     }
 
-
-    // Loads given amount of instances of a given model
+    /// Loads given amount of instances of a given model
     pub async fn load_model(&self, instances: usize) -> Result<()> {
         let model_config = json!({
             "name": self.model_name,
