@@ -1,7 +1,9 @@
+//! Responsible for holding all application configuration under one place
+//! for easy access and setting format for same variables
+
 use dotenvy::from_path;
 use std::path::{Path};
 use std::env;
-use std::process::Command;
 use tracing_subscriber::{fmt, EnvFilter};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -9,18 +11,24 @@ use anyhow::{self, Result, Context};
 
 // Custom modules
 use crate::inference::InferencePrecision;
+use crate::utils;
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+/// Represents the local environment the codebase is on
+/// 
+/// Used mostly to read an environment variables file and
+/// use it in the application rather than external variables
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Environment {
     Production,
     NonProduction
 }
 
-#[derive(Debug)]
+/// Represents all the configuation variables used by the application
 pub struct AppConfig {
     local: bool,
     environment: Environment,
     gpu_name: String,
+    source_image_test: String,
     source_ids: Vec<String>,
     source_confs: HashMap<String, f32>,
     source_conf_default: f32,
@@ -46,6 +54,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// Creates a new instance of the configuration object
     pub fn new(local: bool, environment: Environment) -> Result<Self> {
         // Load variables from local env file
         if local {
@@ -56,10 +65,12 @@ impl AppConfig {
         AppConfig::init_logging();
 
         // GPU information
-        let gpu_name = AppConfig::get_gpu()
+        let gpu_name = utils::get_gpu_name()
             .context("Error getting GPU name")?;
 
         // Streams
+        let source_image_test = env::var("SOURCE_IMAGE_TEST")
+            .context("SOURCE_IMAGE_TEST variable not found")?;
         let source_ids: Vec<String> = AppConfig::parse_list(
             &env::var("SOURCE_IDS")
             .context("SOURCES_IDS variable not found")?
@@ -69,7 +80,7 @@ impl AppConfig {
         // Check if source has a prefrred setting and assign default value if not
         let mut source_confs: HashMap<String, f32> = AppConfig::parse_key_values(
             &env::var("SOURCE_CONFS")
-            .context("SOURCES_IDS variable not found")?
+            .unwrap_or("".to_string())
         );
         let source_conf_default: f32  = env::var("SOURCE_CONF_DEFAULT")
             .context("SOURCE_CONF_DEFAULT variable not found")?
@@ -94,7 +105,7 @@ impl AppConfig {
         // Check if source has a prefrred setting and assign default value if not
         let mut source_inf_frames: HashMap<String, usize> = AppConfig::parse_key_values(
             &env::var("SOURCE_INF_FRAMES")
-            .context("SOURCE_INF_FRAMES variable not found")?
+            .unwrap_or("".to_string())
         );
         let source_inf_frame_default: usize  = env::var("SOURCE_INF_FRAME_DEFAULT")
             .context("SOURCE_INF_FRAME_DEFAULT variable not found")?
@@ -180,6 +191,7 @@ impl AppConfig {
             local,
             environment,
             gpu_name,
+            source_image_test,
             source_ids,
             source_confs,
             source_conf_default,
@@ -205,6 +217,7 @@ impl AppConfig {
         })
     }
 
+    /// Loads environment variables from a local .env file
     fn load_env_file(environment: Environment) -> Result<()> {
         let base_dir = Path::new(file!()).parent()
             .context("Error getting config parent directory")?;
@@ -225,6 +238,7 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Initiates structured logging
     fn init_logging() {
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::from_default_env())
@@ -235,24 +249,7 @@ impl AppConfig {
             .init();
     }
 
-    fn get_gpu() -> Result<String> {
-        let output = Command::new("nvidia-smi")
-            .args(&["--query-gpu=name", "--format=csv,noheader", "--id=0"])
-            .output()
-            .context("failed to execute nvidia-smi")?;
-
-        if !output.status.success() {
-            anyhow::bail!("GPU ID 0 not found")
-        }
-
-        Ok(
-            String::from_utf8(output.stdout)
-            .context("Cannot parse GPU name")?
-            .trim()
-            .to_string()
-        )
-    }
-
+    /// Parses environment variables as an hashmap
     fn parse_key_values<T>(input: &str) -> HashMap<String, T>
     where
         T: FromStr,
@@ -272,6 +269,7 @@ impl AppConfig {
             .collect()
     }
 
+    /// Parses environment variable as a list
     fn parse_list<T>(input: &str) -> Vec<T>
     where
         T: FromStr,
@@ -295,6 +293,10 @@ impl AppConfig {
 
     pub fn gpu_name(&self) -> &str {
         &self.gpu_name
+    }
+
+    pub fn source_image_test(&self) -> &str {
+        &self.source_image_test
     }
 
     pub fn source_ids(&self) -> &Vec<String> {

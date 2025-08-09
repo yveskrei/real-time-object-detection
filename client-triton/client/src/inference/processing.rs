@@ -7,12 +7,14 @@ use anyhow::{Result};
 // Custom modules
 use crate::inference::{InferencePrecision, InferenceResult, InferenceFrame};
 
-// Initiate all thread safe lookup tables
+/// Lookup table for converting values from FP16 to FP32
 pub static F16_TO_F32_LUT: OnceLock<Box<[f32; 65536]>> = OnceLock::new();
+/// Lookup table for converting pixel values to FP16
 pub static F16_LUT: OnceLock<Box<[u16; 256]>> = OnceLock::new();
+/// Lookup table for converting pixel values to FP32
 pub static F32_LUT: OnceLock<Box<[f32; 256]>> = OnceLock::new();
 
-// F16 TO F32
+/// Create static lookup table for high speed conversion
 fn create_f16_to_f32_lut() -> Box<[f32; 65536]> {
     let mut lut = Box::new([0.0f32; 65536]);
         
@@ -53,7 +55,7 @@ fn get_f16_to_f32_lut(val: u16) -> f32 {
         .get_or_init(create_f16_to_f32_lut)[val as usize]
 }
 
-// F16 LUT
+/// Create static lookup table for high speed conversion
 fn create_f16_lut() -> Box<[u16; 256]> {
     let mut lut = Box::new([0u16; 256]);
     for i in 0..256 {
@@ -83,7 +85,7 @@ fn get_f16_lut() -> &'static [u16; 256] {
         .get_or_init(create_f16_lut)
 }
 
-// F32 LUT
+/// Create static lookup table for high speed conversion
 fn create_f32_lut() -> Box<[f32; 256]> {
     let mut lut = Box::new([0.0f32; 256]);
     for i in 0..256 {
@@ -101,24 +103,39 @@ fn get_f32_lut() -> &'static [f32; 256] {
 struct LetterboxParams {
     pad_x: f32,
     pad_y: f32,
+    new_width: usize,
+    new_height: usize,
+    _scale: f32,
     inv_scale: f32,
 }
 
-fn calculate_letterbox_fast(height: usize, width: usize) -> LetterboxParams {
-    const TARGET_SIZE: f32 = 640.0;
-    const TARGET_SIZE_HALF: f32 = 320.0;
+/// Calculates values for letterbox padding
+/// 
+/// Calculates necessary values to preserve the the aspect ratio of a given image
+/// by adding additional blank pixels
+fn calculate_letterbox(height: usize, width: usize, target_size: usize) -> LetterboxParams {
+    let max_dim = height.max(width) as f32;
+    let scale = (target_size as f32) / max_dim;
+    let inv_scale = max_dim / (target_size as f32);
     
-    let w_inv = 1.0 / width as f32;
-    let h_inv = 1.0 / height as f32;
-    let scale = TARGET_SIZE * w_inv.min(h_inv);
+    let new_width = ((width as f32 * scale) as usize).min(target_size);
+    let new_height = ((height as f32 * scale) as usize).min(target_size);
+    
+    // Use bit shift for division by 2 when possible
+    let pad_x = ((target_size - new_width) >> 1) as f32;
+    let pad_y = ((target_size - new_height) >> 1) as f32;
     
     LetterboxParams {
-        pad_x: TARGET_SIZE_HALF - width as f32 * scale * 0.5,
-        pad_y: TARGET_SIZE_HALF - height as f32 * scale * 0.5,
-        inv_scale: 1.0 / scale,
+        pad_x,
+        pad_y,
+        new_width,
+        new_height,
+        _scale: scale,
+        inv_scale,
     }
 }
 
+/// Perform NMS reduction of bboxes
 #[inline(never)] // Don't inline to keep instruction cache hot for main loop
 fn bbox_nms(detections: &mut Vec<InferenceResult>, nms_threshold: f32) {
     let len = detections.len();
@@ -188,7 +205,6 @@ fn bbox_nms(detections: &mut Vec<InferenceResult>, nms_threshold: f32) {
 /// class for the bbox along with its probabiliy
 /// 3. Filter BBOXes on a given confidence threshold, before applying NMS(boosts performance significantly)
 /// 4. Perform NMS on left over BBOXes
-
 pub fn postprocess_yolo(
     results: &[u8],
     original_frame: &InferenceFrame,
@@ -219,7 +235,8 @@ pub fn postprocess_yolo(
     }
     
     // Precompute letterbox parameters
-    let lb = calculate_letterbox_fast(original_frame.height, original_frame.width);
+    const TARGET_SIZE: usize = 640;
+    let lb = calculate_letterbox(original_frame.height, original_frame.width, TARGET_SIZE);
     
     // Pre-allocate with exact capacity estimate (typically ~100-200 detections)
     let mut detections = Vec::with_capacity(256);
@@ -391,10 +408,8 @@ pub fn postprocess_yolo(
 /// 2. Normalizes pixels from 0-255 to 0-1
 /// 3. Converting raw pixel values to required precision datatype
 /// 4. Outputs raw bytes ordered by color channels: \[RRRBBBGGG\]
-
 pub fn preprocess_yolo(
     frame: &InferenceFrame,
-    input_shape: &[i64; 3],
     precision: InferencePrecision,
 ) -> Result<Vec<u8>> {
     // Check if input size matches
@@ -410,32 +425,26 @@ pub fn preprocess_yolo(
     }
 
     // Calculate target size
-    let target_size = input_shape[1] as usize;
-    let target_pixels = target_size * target_size;
+    const TARGET_SIZE: usize = 640;
+    const TARGET_PIXELS: usize = TARGET_SIZE * TARGET_SIZE;
 
-    // Fast letterbox calculation
-    let scale = (target_size as f32) / (frame.height.max(frame.width) as f32);
-    let new_width = ((frame.width as f32 * scale) as usize).min(target_size);
-    let new_height = ((frame.height as f32 * scale) as usize).min(target_size);
-    let pad_x = (target_size - new_width) >> 1;
-    let pad_y = (target_size - new_height) >> 1;
-    let inv_scale = 1.0 / scale;
+    // letterbox calculation
+    let lb = calculate_letterbox(frame.height, frame.width, TARGET_SIZE);
     
     // Stack-allocated coordinate buffers - each thread gets its own!
-    const MAX_SIZE: usize = 640;
-    let mut y_src_offsets: [usize; MAX_SIZE] = [0; MAX_SIZE];
-    let mut y_dst_offsets: [usize; MAX_SIZE] = [0; MAX_SIZE];
-    let mut x_offsets: [usize; MAX_SIZE] = [0; MAX_SIZE];
+    let mut y_src_offsets: [usize; TARGET_SIZE] = [0; TARGET_SIZE];
+    let mut y_dst_offsets: [usize; TARGET_SIZE] = [0; TARGET_SIZE];
+    let mut x_offsets: [usize; TARGET_SIZE] = [0; TARGET_SIZE];
     
     // Pre-compute Y coordinates
-    for y in 0..new_height.min(MAX_SIZE) {
-        y_src_offsets[y] = ((y as f32 * inv_scale) as usize).min(frame.height - 1) * frame.width * 3;
-        y_dst_offsets[y] = (y + pad_y) * target_size + pad_x;
+    for y in 0..lb.new_height.min(TARGET_SIZE) {
+        y_src_offsets[y] = ((y as f32 * lb.inv_scale) as usize).min(frame.height - 1) * frame.width * 3;
+        y_dst_offsets[y] = (y + lb.pad_y as usize) * TARGET_SIZE + lb.pad_x as usize;
     }
     
     // Pre-compute X coordinates  
-    for x in 0..new_width.min(MAX_SIZE) {
-        x_offsets[x] = ((x as f32 * inv_scale) as usize).min(frame.width - 1) * 3;
+    for x in 0..lb.new_width.min(TARGET_SIZE) {
+        x_offsets[x] = ((x as f32 * lb.inv_scale) as usize).min(frame.width - 1) * 3;
     }
     
     match precision {
@@ -444,8 +453,8 @@ pub fn preprocess_yolo(
             let gray_val = get_f16_lut()[114];
             let gray_bytes: [u8; 2] = unsafe { std::mem::transmute(gray_val) };
             
-            let mut output: Vec<u8> = Vec::with_capacity(target_pixels * 6);
-            unsafe { output.set_len(target_pixels * 6) };
+            let mut output: Vec<u8> = Vec::with_capacity(TARGET_PIXELS * 6);
+            unsafe { output.set_len(TARGET_PIXELS * 6) };
             
             // Fast gray fill using 64-bit writes
             unsafe {
@@ -455,13 +464,13 @@ pub fn preprocess_yolo(
                     gray_bytes[0], gray_bytes[1], gray_bytes[0], gray_bytes[1],
                 ]);
                 
-                let chunks = (target_pixels * 6) >> 3; // div by 8
+                let chunks = (TARGET_PIXELS * 6) >> 3; // div by 8
                 for i in 0..chunks {
                     *ptr.add(i) = gray_pattern;
                 }
                 
                 // Handle remaining bytes
-                let remainder = (target_pixels * 6) & 7;
+                let remainder = (TARGET_PIXELS * 6) & 7;
                 if remainder > 0 {
                     let start = chunks << 3;
                     for i in 0..remainder {
@@ -475,14 +484,14 @@ pub fn preprocess_yolo(
                 let out_ptr = output.as_mut_ptr() as *mut u16;
                 let lut = get_f16_lut().as_ptr();
                 
-                for y in 0..new_height {
+                for y in 0..lb.new_height {
                     let src_row = y_src_offsets[y];
                     let dst_base = y_dst_offsets[y];
                     
                     let mut x = 0;
                     
                     // 32x unroll for maximum ILP
-                    while x + 32 <= new_width {
+                    while x + 32 <= lb.new_width {
                         for i in 0..32 {
                             let src = src_row + x_offsets[x + i];
                             let dst = dst_base + x + i;
@@ -492,14 +501,14 @@ pub fn preprocess_yolo(
                             let b = *img_ptr.add(src + 2) as usize;
                             
                             *out_ptr.add(dst) = *lut.add(r);
-                            *out_ptr.add(dst + target_pixels) = *lut.add(g);
-                            *out_ptr.add(dst + (target_pixels << 1)) = *lut.add(b);
+                            *out_ptr.add(dst + TARGET_PIXELS) = *lut.add(g);
+                            *out_ptr.add(dst + (TARGET_PIXELS << 1)) = *lut.add(b);
                         }
                         x += 32;
                     }
                     
                     // 8x unroll for remainder
-                    while x + 8 <= new_width {
+                    while x + 8 <= lb.new_width {
                         for i in 0..8 {
                             let src = src_row + x_offsets[x + i];
                             let dst = dst_base + x + i;
@@ -509,14 +518,14 @@ pub fn preprocess_yolo(
                             let b = *img_ptr.add(src + 2) as usize;
                             
                             *out_ptr.add(dst) = *lut.add(r);
-                            *out_ptr.add(dst + target_pixels) = *lut.add(g);
-                            *out_ptr.add(dst + (target_pixels << 1)) = *lut.add(b);
+                            *out_ptr.add(dst + TARGET_PIXELS) = *lut.add(g);
+                            *out_ptr.add(dst + (TARGET_PIXELS << 1)) = *lut.add(b);
                         }
                         x += 8;
                     }
                     
                     // Final pixels
-                    while x < new_width {
+                    while x < lb.new_width {
                         let src = src_row + x_offsets[x];
                         let dst = dst_base + x;
                         
@@ -525,8 +534,8 @@ pub fn preprocess_yolo(
                         let b = *img_ptr.add(src + 2) as usize;
                         
                         *out_ptr.add(dst) = *lut.add(r);
-                        *out_ptr.add(dst + target_pixels) = *lut.add(g);
-                        *out_ptr.add(dst + (target_pixels << 1)) = *lut.add(b);
+                        *out_ptr.add(dst + TARGET_PIXELS) = *lut.add(g);
+                        *out_ptr.add(dst + (TARGET_PIXELS << 1)) = *lut.add(b);
                         
                         x += 1;
                     }
@@ -540,8 +549,8 @@ pub fn preprocess_yolo(
             let gray_val = get_f32_lut()[114];
             let gray_bytes: [u8; 4] = unsafe { std::mem::transmute(gray_val) };
             
-            let mut output: Vec<u8> = Vec::with_capacity(target_pixels * 12);
-            unsafe { output.set_len(target_pixels * 12) };
+            let mut output: Vec<u8> = Vec::with_capacity(TARGET_PIXELS * 12);
+            unsafe { output.set_len(TARGET_PIXELS * 12) };
             
             // Fast gray fill using 128-bit writes where possible
             unsafe {
@@ -556,14 +565,14 @@ pub fn preprocess_yolo(
                     gray_bytes[0], gray_bytes[1], gray_bytes[2], gray_bytes[3],
                 ]);
                 
-                let chunks = (target_pixels * 12) >> 4; // div by 16
+                let chunks = (TARGET_PIXELS * 12) >> 4; // div by 16
                 for i in 0..chunks {
                     *ptr_128.add(i) = gray_pattern;
                 }
                 
                 // Handle remainder with 32-bit writes
                 let remainder_start = chunks << 4;
-                let remainder = (target_pixels * 12) - remainder_start;
+                let remainder = (TARGET_PIXELS * 12) - remainder_start;
                 if remainder > 0 {
                     let ptr_32 = ptr.add(remainder_start) as *mut u32;
                     let gray_u32 = u32::from_ne_bytes(gray_bytes);
@@ -578,14 +587,14 @@ pub fn preprocess_yolo(
                 let out_ptr = output.as_mut_ptr() as *mut f32;
                 let lut = get_f32_lut().as_ptr();
                 
-                for y in 0..new_height {
+                for y in 0..lb.new_height {
                     let src_row = y_src_offsets[y];
                     let dst_base = y_dst_offsets[y];
                     
                     let mut x = 0;
                     
                     // 32x unroll
-                    while x + 32 <= new_width {
+                    while x + 32 <= lb.new_width {
                         for i in 0..32 {
                             let src = src_row + x_offsets[x + i];
                             let dst = dst_base + x + i;
@@ -595,14 +604,14 @@ pub fn preprocess_yolo(
                             let b = *img_ptr.add(src + 2) as usize;
                             
                             *out_ptr.add(dst) = *lut.add(r);
-                            *out_ptr.add(dst + target_pixels) = *lut.add(g);
-                            *out_ptr.add(dst + (target_pixels << 1)) = *lut.add(b);
+                            *out_ptr.add(dst + TARGET_PIXELS) = *lut.add(g);
+                            *out_ptr.add(dst + (TARGET_PIXELS << 1)) = *lut.add(b);
                         }
                         x += 32;
                     }
                     
                     // 8x unroll
-                    while x + 8 <= new_width {
+                    while x + 8 <= lb.new_width {
                         for i in 0..8 {
                             let src = src_row + x_offsets[x + i];
                             let dst = dst_base + x + i;
@@ -612,13 +621,13 @@ pub fn preprocess_yolo(
                             let b = *img_ptr.add(src + 2) as usize;
                             
                             *out_ptr.add(dst) = *lut.add(r);
-                            *out_ptr.add(dst + target_pixels) = *lut.add(g);
-                            *out_ptr.add(dst + (target_pixels << 1)) = *lut.add(b);
+                            *out_ptr.add(dst + TARGET_PIXELS) = *lut.add(g);
+                            *out_ptr.add(dst + (TARGET_PIXELS << 1)) = *lut.add(b);
                         }
                         x += 8;
                     }
                     
-                    while x < new_width {
+                    while x < lb.new_width {
                         let src = src_row + x_offsets[x];
                         let dst = dst_base + x;
                         
@@ -627,8 +636,8 @@ pub fn preprocess_yolo(
                         let b = *img_ptr.add(src + 2) as usize;
                         
                         *out_ptr.add(dst) = *lut.add(r);
-                        *out_ptr.add(dst + target_pixels) = *lut.add(g);
-                        *out_ptr.add(dst + (target_pixels << 1)) = *lut.add(b);
+                        *out_ptr.add(dst + TARGET_PIXELS) = *lut.add(g);
+                        *out_ptr.add(dst + (TARGET_PIXELS << 1)) = *lut.add(b);
                         
                         x += 1;
                     }

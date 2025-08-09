@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use tokio::time::{Duration, Instant};
 use anyhow::{Result, Context};
 
 // Custom modules
@@ -28,27 +28,33 @@ async fn main() -> Result<()> {
         .context("Error initiating source processors")?;
 
     // Perform test inference
-    let (image, image_height, image_width) = utils::get_image_raw("/mnt/disk_e/Programming/real-time-object-detection/client-triton/giraffes.jpg")
-        .context("Error loading sample image")?;
-    let processor1 = source::get_source_processor("2025")?;
-    let processor2 = source::get_source_processor("3033")?;
-    let processor3 = source::get_source_processor("2026")?;
-    let processor4 = source::get_source_processor("2027")?;
-    let processor5 = source::get_source_processor("2028")?;
-    
-    loop {
-        // Trigger frame processing
-        processor1.process_frame(&image.clone(), image_height, image_width);
-        tokio::time::sleep(Duration::from_millis(2)).await;
-        processor2.process_frame(&image.clone(), image_height, image_width);
-        tokio::time::sleep(Duration::from_millis(2)).await;
-        processor3.process_frame(&image.clone(), image_height, image_width);
-        tokio::time::sleep(Duration::from_millis(2)).await;
-        processor4.process_frame(&image.clone(), image_height, image_width);
-        tokio::time::sleep(Duration::from_millis(2)).await;
-        processor5.process_frame(&image.clone(), image_height, image_width);
-        tokio::time::sleep(Duration::from_millis(2)).await;
+    let (image, image_height, image_width) = utils::get_image_raw(app_config.source_image_test())
+        .context("Error loading test image")?;
+
+    // Initialize all processors
+    let mut processors = Vec::new();
+    for source_id in app_config.source_ids() {
+        let processor = source::get_source_processor(source_id).await?;
+        processors.push(processor);
     }
 
-    Ok(())
+    let frame_interval = Duration::from_millis(34); // 30fps = ~33.33ms, using 34ms
+    let stagger_delay = Duration::from_millis(2);   // 2ms delay between processors
+
+    loop {
+        let frame_start = Instant::now();
+        
+        // Process each processor with staggered timing
+        for processor in &processors {
+            processor.process_frame(&image.clone(), image_height, image_width);
+            tokio::time::sleep(stagger_delay).await;
+        }
+        
+        // Calculate remaining time to maintain 30fps
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_interval {
+            let remaining = frame_interval - elapsed;
+            tokio::time::sleep(remaining).await;
+        }
+    }
 }
