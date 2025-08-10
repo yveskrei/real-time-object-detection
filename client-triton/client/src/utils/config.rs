@@ -223,8 +223,8 @@ impl AppConfig {
             .context("Error getting config parent directory")?;
 
         let env_file = match environment {
-            Environment::Production => ".env_test",
-            Environment::NonProduction => ".env_test"
+            Environment::Production => ".env_office",
+            Environment::NonProduction => ".env_home"
         };
 
         let env_path = base_dir.join(format!("../secrets/{}", env_file))
