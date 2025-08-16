@@ -2,9 +2,8 @@
 //! and populating results to third party systems
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::OnceCell;
 use std::sync::atomic::{Ordering, AtomicU64};
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use anyhow::{Result, Context};
 use tokio::time::{Duration, interval, Instant};
@@ -15,22 +14,24 @@ use crate::inference::processing;
 use crate::utils::config::AppConfig;
 
 /// Static instances of source processors
-pub static PROCESSORS: Lazy<RwLock<HashMap<String, Arc<SourceProcessor>>>> = 
-    Lazy::new(|| RwLock::new(HashMap::new()));
+pub static PROCESSORS: OnceCell<HashMap<String, Arc<SourceProcessor>>> = OnceCell::const_new();
 
 /// Returns a source processor instance by given stream ID
 pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
     Ok(
         PROCESSORS
-        .read().await
+        .get()
+        .context("Cannot get static source processors variable")?
         .get(&stream_id.to_string())
         .cloned()
-        .context("Error getting source processor")?
+        .context("Error getting stream source processor")?
     )
 }
 
 /// Initiates source processors for given list of sources
 pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
+    let mut processors: HashMap<String, Arc<SourceProcessor>> = HashMap::new();
+
     for source_id in app_config.source_ids().iter() {
         let confidence_threshold = app_config.source_confs()
             .get(source_id)
@@ -48,11 +49,15 @@ pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
             ).await
         );
 
-        // Set in global variable
-        PROCESSORS
-            .write().await
-            .insert(source_id.clone(), processor);
+        processors.insert(
+            source_id.to_string(),
+            processor
+        );
     }
+
+    // Set to global variable
+    PROCESSORS.set(processors)
+        .map_err(|_| anyhow::anyhow!("Error setting source processors"))?;
 
     Ok(())
 }

@@ -14,72 +14,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use anyhow::{self, Result, Context};
-use std::fs;
-use std::path::PathBuf;
 use tokio::time::{Duration, interval, Instant};
 
 // Custom modules
 use crate::utils::config::AppConfig;
-use crate::utils::s3::S3Client;
 pub mod processing;
 pub mod source;
 use crate::utils;
-
-/// Downloads model from S3 to local machine
-pub async fn load_inference_model(app_config: &AppConfig) -> Result<()> {
-    // Initiate S3 client
-    let s3_client = S3Client::new(
-        app_config.s3_access_key().to_string(),
-        app_config.s3_secret_key().to_string(),
-        app_config.s3_endpoint().to_string(),
-        app_config.s3_region().to_string()
-    );
-
-    // Remove model if already exists in path
-    let model_dir_path_buf = PathBuf::from(format!(
-        "{}/{}",
-        app_config.triton_models_dir(),
-        app_config.model_name()
-    ));
-    let model_dir_path = model_dir_path_buf
-        .to_string_lossy()
-        .to_string();
-
-    if let Ok(_) = fs::remove_dir_all(&model_dir_path) {
-        tracing::warn!("Removed previous model directory")
-    }
-
-    // Create model path based on parameters
-    let model_plan_buf = PathBuf::from(format!(
-        "{}/{}/model.plan", 
-        model_dir_path,
-        app_config.model_version()
-    ));
-    let model_plan = model_plan_buf
-        .to_string_lossy()
-        .to_string();
-
-    // Download model for triton to use
-    let model_s3_buf = PathBuf::from(format!(
-        "{}/{}", 
-        app_config.gpu_name(),
-        app_config.s3_model_path()
-    ));
-    let model_s3 = model_s3_buf
-        .to_string_lossy()
-        .to_string();
-
-    s3_client.download_s3_file(
-        &app_config.s3_models_bucket(), 
-        &model_s3, 
-        &model_plan
-    ).await
-        .context("Error downloading model from S3")?;
-
-    tracing::info!("Successfully downloaded model instance from S3");
-
-    Ok(())
-}
 
 /// Static singleton instance for model inference
 pub static INFERENCE_MODEL: OnceCell<Arc<InferenceModel>> = OnceCell::const_new();
@@ -112,7 +53,17 @@ pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
         app_config.nms_iou_threshold()
     )
         .await
-        .context("Error creating model instance")?;
+        .context("Error creating model client")?;
+
+    // Set global variable
+    INFERENCE_MODEL.set(Arc::new(client_instance))
+        .map_err(|_| anyhow::anyhow!("Error setting model instance"))?;
+
+    Ok(())
+}
+
+pub async fn start_model_instances(instances: usize) -> Result<()> {
+    let client_instance = get_inference_model()?;
 
     // Clear previous model instances
     if let Ok(_) = client_instance.unload_model().await {
@@ -120,14 +71,11 @@ pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
     }
 
     // Initiate model instances
-    client_instance.load_model(app_config.source_ids().len()).await
+    client_instance.load_model(instances).await
         .context("Error loading model instances")?;
 
-    // Set global variable
-    INFERENCE_MODEL.set(Arc::new(client_instance))
-        .map_err(|_| anyhow::anyhow!("Error setting model instance"))?;
-
     Ok(())
+
 }
 
 /// Represents raw frame before performing inference on it

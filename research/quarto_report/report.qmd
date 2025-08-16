@@ -52,7 +52,7 @@ With the goal of minimizing latency of inferance, and maximizing processing thro
 By default, machine learning models use FP32(Floating point 32) datatypes for weights and inputs/outputs by default, allowing higher precision for training, therefore maximizing accuracy. When running inference on the same models, we don't necessarily need all that precision and can "compromise" on lower floating points, i.e. FP16. FP16 should give us much better preformance, while almost not compromising on accuracy. \newline
 We first want to test all model versions for accuracy, determine how lossy is the conversion of floating points and is compromising on floating points even worth it. \newline
 We will do so with a pre-made evaluation script, while models are evaluated on MS-COCO Val 2017 dataset, for consistency purposes(all models are trained on the same data too). \newline
-The goal is to demonstrate how one model compares to another, so the actual performance of the model(how well it performs on the data) is trivial.
+The goal is to demonstrate how one model compares to another, so the actual performance of the model(how well it performs on the data) is negligible.
 
 :::{.center}
 ![mAP (under different IOUs)](../images/map_comparison.png){width=270pt}
@@ -71,35 +71,7 @@ With that said, **FP16 models will be our choice of deployment** as they allow u
 
 {{< pagebreak >}}
 
-## 3.2 Model Performance
-With the fact that FP16 models allow us to have same precision, while being much faster at inference time, we will be having all further tests made on FP16 models only. \newline
-Along with optimizing model internals(the actual neural network)(using efficient code, fp16 models), we need to have some tools to be able to boost the models to a higher level of performance, and **NVIDIA TensorRT** solves just that. NVIDIA TensorRT allows us to compile a model specific to our GPU hardware, therefore very efficient with memory management inside the GPU, giving us peak performance at almost no hard work.
-One of TensorRT's main functions is allowing batch-processing of inputs, therefore allowing us to get multiple results and process much more data in less time. \newline
-Coupled with NVIDIA TensorRT, we also have **NVIDIA Triton Server**, which is a platform used to serve those models and run efficient inference on. All models are served through HTTP/gRPC requests, and allow us to perform inference through those protocols. Triton Server comes hand to hand with TensorRT, leveraging all TensorRT advantages(batch-processing, multiple model instances running at the same time), therefore boosting our performance even more. \newline
-For the following experiment we have compiled our models with TensorRT, specifically with dynamic inputs(Unlocking the batch-processing features) and FP16(for lighter and faster models). We have tested the model throughput for different amounts of concurrent requests, to test how much we can squeeze out of our GPU. \newline
-Experiment ran with the following environment specifications:
-
-* CUDA 12.9
-* TensorRT 10.11.0
-* Triton Server 25.06
-* RTX 4070 GPU
-
-*Note* - The model we deployed on Triton Server uses a specific config tailored to squeeze the best out of our model. It involves dynamic batching, special GPU settings and more. Will be provided alongside this document.
-
-:::{.center}
-![YOLOV9-e FP16 Throughput](../images/throughput_yolov9_e_fp16.png){width=310pt}
-
-![YOLOV9-e-converted FP16 Throughput](../images/throughput_yolov9_e_converted_fp16.png){width=310pt}
-:::
-
-Each graph shows a model performance("stress test") under different amounts of concurrent requests, essentially simulating our "real-time video" scenario. Each dot represents a test conducted for X amount of concurrent requests at once(X-axis), with the average latency we got per request(Y-axis). The color indicates the GPU utilization at the different points, with a scale allowing us to measure how well our GPU is doing at every point. There is also an indication at the top left corner, showing us how much FPS our model was able to serve per second. With our real time video context, it will allow us to calculate how many video streams our model will be able to serve at once:
-$$
-\text{Total Streams} = \frac{\text{Model FPS}}{\text{Video Stream FPS}}
-$$
-
-Looking at our results, we can see that YOLOV9-e outperforms YOLOV9-e-converted by almost double, while maintaining much lower GPU utilization throughout the tests. This leads us to our final conclusion - **YOLOV9-e-fp16 will be our model of choice** for building the real-time video inference application.
-
-## 3.1 Architecture overview
+## 3.2 Architecture overview
 :::{.center}
 ![Architecture for a real time video inference system](../images/architecture.png){width=320pt}
 :::

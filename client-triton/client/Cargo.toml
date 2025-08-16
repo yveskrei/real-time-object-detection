@@ -13,8 +13,4 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter", "time"] }
 once_cell = "1.21.3"
 anyhow = "1.0.98"
-aws-sdk-s3 = { version = "1.101.0", features = ["behavior-version-latest"] }
-aws-config = { version = "1.8.4", features = ["behavior-version-latest"] }
 nvml-wrapper = "0.11.0"
-libloading = "0.8.8"
-libc = "0.2.174"
