@@ -4,10 +4,11 @@
 use dotenvy::from_path;
 use std::path::{Path};
 use std::env;
-use tracing_subscriber::{fmt, EnvFilter};
 use std::collections::HashMap;
 use std::str::FromStr;
 use anyhow::{self, Result, Context};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, fmt};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 // Custom modules
 use crate::inference::InferencePrecision;
@@ -207,13 +208,28 @@ impl AppConfig {
 
     /// Initiates structured logging
     fn init_logging() {
-        tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env())
-            .json()
-            .with_timer(fmt::time::UtcTime::rfc_3339())
-            // .with_thread_ids(true)
-            // .with_thread_names(true)
-            .init();
+        let file_appender = RollingFileAppender::new(Rotation::NEVER, "logs", "app.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(
+            // File layer - JSON format
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_timer(fmt::time::UtcTime::rfc_3339())
+                .with_writer(non_blocking)
+        )
+        .with(
+            // Console layer - pretty format
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_timer(fmt::time::UtcTime::rfc_3339())
+                .with_writer(std::io::stdout)
+        )
+        .init();
+
+    std::mem::forget(_guard);
     }
 
     /// Parses environment variables as an hashmap
@@ -246,6 +262,28 @@ impl AppConfig {
             .split(',')
             .filter_map(|s| s.trim().parse::<T>().ok())
             .collect()
+    }
+
+    pub fn set_source_ids(&mut self, source_ids: Vec<String>) {
+        let mut source_confs: HashMap<String, f32> = HashMap::new();
+        let mut source_inf_frames: HashMap<String, usize> = HashMap::new();
+
+        for source_id in source_ids.iter() {
+            source_confs.insert(
+                source_id.to_string(), 
+                self.source_conf_default()
+            );
+
+            source_inf_frames.insert(
+                source_id.to_string(), 
+                self.source_inf_frame_default()
+            );
+        }
+
+        // Set to config
+        self.source_ids = source_ids;
+        self.source_confs = source_confs;
+        self.source_inf_frames = source_inf_frames;
     }
 }
 
