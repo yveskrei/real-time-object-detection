@@ -12,15 +12,15 @@ async fn main() -> Result<()> {
     let app_config = AppConfig::new(true, Environment::Production)
         .context("Error loading config")?;
 
-    // Download model to local machine
-    inference::load_inference_model(&app_config)
-        .await
-        .context("Error loading inference model locally")?;
-
     //Initiate inference client
     inference::init_inference_model(&app_config)
         .await
         .context("Error initiating inference model")?;
+
+    //Initiate inference client
+    inference::start_model_instances(app_config.source_ids().len())
+        .await
+        .context("Error initiating inference model instances")?;
 
     // Initiate sources processors
     source::init_source_processors(&app_config)

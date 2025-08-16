@@ -43,14 +43,7 @@ pub struct AppConfig {
     model_output_name: String,
     model_output_shape: [i64; 2],
     model_precision: InferencePrecision,
-    nms_iou_threshold: f32,
-    nms_conf_thrershold: f32,
-    s3_access_key: String,
-    s3_secret_key: String,
-    s3_endpoint: String,
-    s3_region: String,
-    s3_models_bucket: String,
-    s3_model_path: String
+    nms_iou_threshold: f32
 }
 
 impl AppConfig {
@@ -168,25 +161,6 @@ impl AppConfig {
             .parse()
             .context("NMS_IOU_THRESHOLD must be a float")?;
 
-        let nms_conf_thrershold: f32 = env::var("NMS_CONF_THRESHOLD")
-            .context("NMS_CONF_THRESHOLD variable not found")?
-            .parse()
-            .context("NMS_CONF_THRESHOLD must be a float")?;
-
-        // S3 information
-        let s3_access_key = env::var("S3_ACCESS_KEY")
-            .context("S3_ACCESS_KEY variable not found")?;
-        let s3_secret_key = env::var("S3_SECRET_KEY")
-            .context("S3_SECRET_KEY variable not found")?;
-        let s3_endpoint = env::var("S3_ENDPOINT")
-            .context("S3_ENDPOINT variable not found")?;
-        let s3_region = env::var("S3_REGION")
-            .context("S3_REGION variable not found")?;
-        let s3_models_bucket = env::var("S3_MODELS_BUCKET")
-            .context("S3_MODELS_BUCKET variable not found")?;
-        let s3_model_path = env::var("S3_MODEL_PATH")
-            .context("S3_MODEL_PATH variable not found")?;
-
         Ok(Self {
             local,
             environment,
@@ -206,14 +180,7 @@ impl AppConfig {
             model_output_name,
             model_output_shape,
             model_precision,
-            nms_iou_threshold,
-            nms_conf_thrershold,
-            s3_access_key,
-            s3_secret_key,
-            s3_endpoint,
-            s3_region,
-            s3_models_bucket,
-            s3_model_path
+            nms_iou_threshold
         })
     }
 
@@ -223,8 +190,8 @@ impl AppConfig {
             .context("Error getting config parent directory")?;
 
         let env_file = match environment {
-            Environment::Production => ".env_office",
-            Environment::NonProduction => ".env_home"
+            Environment::Production => ".env",
+            Environment::NonProduction => ".env"
         };
 
         let env_path = base_dir.join(format!("../secrets/{}", env_file))
@@ -357,33 +324,5 @@ impl AppConfig {
 
     pub fn nms_iou_threshold(&self) -> f32 {
         self.nms_iou_threshold
-    }
-
-    pub fn nms_conf_thrershold(&self) -> f32 {
-        self.nms_conf_thrershold
-    }
-
-    pub fn s3_access_key(&self) -> &str {
-        &self.s3_access_key
-    }
-
-    pub fn s3_secret_key(&self) -> &str {
-        &self.s3_secret_key
-    }
-
-    pub fn s3_endpoint(&self) -> &str {
-        &self.s3_endpoint
-    }
-
-    pub fn s3_region(&self) -> &str {
-        &self.s3_region
-    }
-
-    pub fn s3_models_bucket(&self) -> &str {
-        &self.s3_models_bucket
-    }
-
-    pub fn s3_model_path(&self) -> &str {
-        &self.s3_model_path
     }
 }

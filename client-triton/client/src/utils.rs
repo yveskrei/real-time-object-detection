@@ -4,7 +4,6 @@ use nvml_wrapper::Nvml;
 
 // Custom modules
 pub mod config;
-pub mod s3;
 
 /// Represents GPU statistics that are reported by the application
 pub struct GPUStats {
