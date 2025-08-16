@@ -2,11 +2,12 @@
 //! and populating results to third party systems
 
 use std::sync::Arc;
-use tokio::sync::OnceCell;
 use std::sync::atomic::{Ordering, AtomicU64};
 use std::collections::HashMap;
 use anyhow::{Result, Context};
 use tokio::time::{Duration, interval, Instant};
+use tokio::sync::RwLock;
+use std::sync::LazyLock;
 
 // Custom modules
 use crate::inference::{self, InferenceFrame, InferenceResult};
@@ -14,14 +15,14 @@ use crate::inference::processing;
 use crate::utils::config::AppConfig;
 
 /// Static instances of source processors
-pub static PROCESSORS: OnceCell<HashMap<String, Arc<SourceProcessor>>> = OnceCell::const_new();
+pub static PROCESSORS: LazyLock<RwLock<HashMap<String, Arc<SourceProcessor>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Returns a source processor instance by given stream ID
 pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
     Ok(
         PROCESSORS
-        .get()
-        .context("Cannot get static source processors variable")?
+        .read()
+        .await
         .get(&stream_id.to_string())
         .cloned()
         .context("Error getting stream source processor")?
@@ -43,7 +44,7 @@ pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
         // Start processor
         let processor = Arc::new(
             SourceProcessor::new(
-                source_id.clone(), 
+                source_id.to_string(), 
                 *confidence_threshold, 
                 *inference_frame
             ).await
@@ -56,8 +57,7 @@ pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
     }
 
     // Set to global variable
-    PROCESSORS.set(processors)
-        .map_err(|_| anyhow::anyhow!("Error setting source processors"))?;
+    *PROCESSORS.write().await = processors;
 
     Ok(())
 }
@@ -82,8 +82,8 @@ pub struct SourceProcessStats {
 pub struct SourceProcessor {
     // Settings for multi-threading
     frame_sender: tokio::sync::mpsc::Sender<InferenceFrame>,
-    _process_handle: tokio::task::JoinHandle<()>,
-    _stats_handle: tokio::task::JoinHandle<()>,
+    process_handle: tokio::task::JoinHandle<()>,
+    stats_handle: tokio::task::JoinHandle<()>,
 
     // Source specific settings
     source_id: String,
@@ -185,7 +185,7 @@ impl SourceProcessor {
         let stats_total_post_proc_time = total_post_proc_time.clone();
         let stats_total_results_time = total_results_time.clone();
         let stats_total_processing_time = total_processing_time.clone();
-        let stats_interval = Duration::from_secs(5);
+        let stats_interval = Duration::from_secs(1);
 
         let stats_handle = tokio::spawn(async move {
             let mut interval = interval(stats_interval);
@@ -231,8 +231,8 @@ impl SourceProcessor {
         
         Self {
             frame_sender: tx,
-            _process_handle: process_handle,
-            _stats_handle: stats_handle,
+            process_handle,
+            stats_handle,
             source_id,
             confidence_threshold,
             inference_frame,
@@ -378,5 +378,13 @@ impl SourceProcessor {
             avg_processing=avg_processing,
             "inference statistics"
         );
+    }
+}
+
+impl Drop for SourceProcessor {
+    fn drop(&mut self) {
+        // Abort tokio tasks
+        self.process_handle.abort();
+        self.stats_handle.abort();
     }
 }

@@ -14,3 +14,4 @@ tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter", "ti
 once_cell = "1.21.3"
 anyhow = "1.0.98"
 nvml-wrapper = "0.11.0"
+tracing-appender = "0.2.3"

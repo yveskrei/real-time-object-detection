@@ -150,7 +150,7 @@ pub struct InferenceModel {
     precision: InferencePrecision,
     nms_iou_threshold: f32,
     base_request: ModelInferRequest,
-    _stats_handle: tokio::task::JoinHandle<()>
+    stats_handle: tokio::task::JoinHandle<()>
 }
 
 impl InferenceModel {
@@ -272,7 +272,7 @@ impl InferenceModel {
             precision,
             nms_iou_threshold,
             base_request,
-            _stats_handle: stats_handle
+            stats_handle
         })
     }
 
@@ -451,5 +451,12 @@ impl InferenceModel {
 
     pub fn base_request(&self) -> &ModelInferRequest {
         &self.base_request
+    }
+}
+
+impl Drop for InferenceModel {
+    fn drop(&mut self) {
+        // Abort tokio task
+        self.stats_handle.abort();
     }
 }
