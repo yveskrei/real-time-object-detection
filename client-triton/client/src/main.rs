@@ -22,8 +22,8 @@ async fn main() -> Result<()> {
         .context("Error loading test image")?;
     
     // Test variables
-    let max_streams = 10; // Adjust this to your desired maximum
-    let test_duration = Duration::from_secs(15); // 60 second test
+    let max_streams = 1; // Adjust this to your desired maximum
+    let test_duration = Duration::from_secs(120); // 60 second test
     let frame_interval = Duration::from_millis(34); // 30fps = ~33.33ms, using 34ms
     let stagger_delay = Duration::from_millis(2);   // 2ms delay between processors
 
@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
             
             // Process each processor with staggered timing
             for processor in &processors {
-                processor.process_frame(&image.clone(), image_height, image_width);
+                processor.process_frame(image.clone(), image_height, image_width);
                 tokio::time::sleep(stagger_delay).await;
             }
             
