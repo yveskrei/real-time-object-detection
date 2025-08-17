@@ -249,7 +249,7 @@ impl SourceProcessor {
     }
 
     /// Sends inference requests to a seperate thread pool
-    pub fn process_frame(&self, raw_frame: &[u8], height: usize, width: usize) {
+    pub fn process_frame(&self, raw_frame: Vec<u8>, height: usize, width: usize) {
         // Send processing request to seperate thread
         let frames_total = self.frames_total.fetch_add(1, Ordering::Relaxed);
 
@@ -260,7 +260,7 @@ impl SourceProcessor {
 
             // Send frame to processing
             let frame = InferenceFrame {
-                data: raw_frame.to_vec(),
+                data: raw_frame,
                 height,
                 width,
                 added: Instant::now()
@@ -307,13 +307,13 @@ impl SourceProcessor {
 
 
         // Perform inference on frame
-        let inference_results = inference_model.infer(&pre_proc_frame).await?;
+        let inference_results = inference_model.infer(pre_proc_frame).await?;
         let inference_time = inference_start.elapsed() - pre_proc_time;
 
         // Post-process inference results
         let bboxes = processing::postprocess_yolo(
             &inference_results, 
-            &frame,
+            frame,
             inference_model.output_shape(),
             inference_model.precision(),
             confidence_threshold,

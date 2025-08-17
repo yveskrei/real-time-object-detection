@@ -208,7 +208,7 @@ impl InferenceModel {
                     parameters: HashMap::new(),
                 }
             ],
-            raw_input_contents: vec![]
+            raw_input_contents: Vec::new()
         };
 
 
@@ -318,7 +318,7 @@ impl InferenceModel {
                 }
             ],
             "dynamic_batching": {
-                "max_queue_delay_microseconds": 1000,
+                "max_queue_delay_microseconds": 500,
                 "preferred_batch_size": [2, 4, 8, 12, 16]
             },
             "optimization": {
@@ -338,7 +338,8 @@ impl InferenceModel {
                 },
                 "output_pinned_memory": {
                     "enable": true
-                }
+                },
+                "gather_kernel_buffer_threshold": 0
             },
             "model_transaction_policy": {
                 "decoupled": false
@@ -377,10 +378,10 @@ impl InferenceModel {
     }
 
     /// Performs inference on a raw image, returning raw model results
-    pub async fn infer(&self, image: &[u8]) -> Result<Vec<u8>> {
+    pub async fn infer(&self, image: Vec<u8>) -> Result<Vec<u8>> {
         // Create new inference request
         let mut inference_request = self.base_request.clone();
-        inference_request.raw_input_contents = vec![image.to_vec()];
+        inference_request.raw_input_contents.push(image);
 
         // Perform inference
         let inference_result = self.client.model_infer(inference_request)
