@@ -69,4 +69,3 @@ client-triton/triton_models/
 client-triton/client/target/
 client-triton/client/Cargo.lock
 client-triton/client/offline-crates/
-client-triton/client/src/secrets/
