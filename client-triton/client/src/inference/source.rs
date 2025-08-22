@@ -33,11 +33,11 @@ pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor
 pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
     let mut processors: HashMap<String, Arc<SourceProcessor>> = HashMap::new();
 
-    for source_id in app_config.source_ids().iter() {
-        let confidence_threshold = app_config.source_confs()
+    for source_id in app_config.sources_config().ids.iter() {
+        let confidence_threshold = app_config.sources_config().confs
             .get(source_id)
             .context("Source does not have confidence threshold setting")?;
-        let inference_frame = app_config.source_inf_frames()
+        let inference_frame = app_config.sources_config().inf_frames
             .get(source_id)
             .context("Source does not have inference frame setting")?;
         
@@ -301,7 +301,7 @@ impl SourceProcessor {
         // Pre-process raw frame
         let pre_proc_frame = processing::preprocess_yolo(
             frame,
-            inference_model.precision()
+            inference_model.model_config().precision
         )?;
         let pre_proc_time = inference_start.elapsed();
 
@@ -314,8 +314,8 @@ impl SourceProcessor {
         let bboxes = processing::postprocess_yolo(
             &inference_results, 
             frame,
-            inference_model.output_shape(),
-            inference_model.precision(),
+            &inference_model.model_config().output_shape,
+            inference_model.model_config().precision,
             confidence_threshold,
             inference_model.nms_iou_threshold()
         )?;

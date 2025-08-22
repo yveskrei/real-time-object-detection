@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
         app_config.set_source_ids(source_ids);
 
         //Initiate inference client
-        inference::start_model_instances(app_config.source_ids().len())
+        inference::start_model_instances(app_config.sources_config().ids.len())
             .await
             .context("Error initiating inference model instances")?;
 
@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
 
         // Initialize all processors
         let mut processors = Vec::new();
-        for source_id in app_config.source_ids() {
+        for source_id in app_config.sources_config().ids.iter() {
             let processor = source::get_source_processor(source_id).await?;
             processors.push(processor);
         }
