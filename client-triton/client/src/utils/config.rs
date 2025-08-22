@@ -24,26 +24,37 @@ pub enum Environment {
     NonProduction
 }
 
+#[derive(Clone)]
+pub struct ModelConfig {
+    pub name: String,
+    pub version: String,
+    pub input_name: String,
+    pub input_shape: [i64; 3],
+    pub output_name: String,
+    pub output_shape: [i64; 2],
+    pub max_batch_size: usize,
+    pub perf_batch_sizes: Vec<usize>,
+    pub precision: InferencePrecision
+}
+
+pub struct SourcesConfig {
+    pub ids: Vec<String>,
+    pub confs: HashMap<String, f32>,
+    pub conf_default: f32,
+    pub inf_frames: HashMap<String, usize>,
+    pub inf_frame_default: usize
+}
+
 /// Represents all the configuation variables used by the application
 pub struct AppConfig {
     local: bool,
     environment: Environment,
     gpu_name: String,
     source_image_test: String,
-    source_ids: Vec<String>,
-    source_confs: HashMap<String, f32>,
-    source_conf_default: f32,
-    source_inf_frames: HashMap<String, usize>,
-    source_inf_frame_default: usize,
+    sources_config: SourcesConfig,
     triton_url: String,
     triton_models_dir: String,
-    model_name: String,
-    model_version: String,
-    model_input_name: String,
-    model_input_shape: [i64; 3],
-    model_output_name: String,
-    model_output_shape: [i64; 2],
-    model_precision: InferencePrecision,
+    model_config: ModelConfig,
     nms_iou_threshold: f32
 }
 
@@ -56,7 +67,7 @@ impl AppConfig {
         }
 
         // Initiate app logging
-        AppConfig::init_logging();
+        AppConfig::init_logging(local);
 
         // GPU information
         let gpu_name = utils::get_gpu_name()
@@ -120,41 +131,63 @@ impl AppConfig {
             }
         }
 
-        // Inference model
+        let sources_config = SourcesConfig {
+            ids: source_ids,
+            confs: source_confs,
+            conf_default: source_conf_default,
+            inf_frames: source_inf_frames,
+            inf_frame_default: source_inf_frame_default
+        };
+
+        // Triton
         let triton_url = env::var("TRITON_URL")
             .context("TRITON_URL variable not found")?;
         let triton_models_dir = env::var("TRITON_MODELS_DIR")
             .context("TRITON_MODELS_DIR variable not found")?;
-        let model_name = env::var("MODEL_NAME")
-            .context("MODEL_NAME variable not found")?;
-        let model_version = env::var("MODEL_VERSION")
-            .context("MODEL_VERSION variable not found")?;
-        let model_input_name = env::var("MODEL_INPUT_NAME")
-            .context("MODEL_INPUT_NAME variable not found")?;
-        let model_output_name = env::var("MODEL_OUTPUT_NAME")
-            .context("MODEL_OUTPUT_NAME variable not found")?;
-        let model_precision: InferencePrecision = env::var("MODEL_PRECISION")
-            .context("MODEL_PRECISION variable not found")?
-            .parse()
-            .context("Must be valid precision")?;
 
-        // Model input
-        let model_input_shape: Vec<i64> = AppConfig::parse_list(
-            &env::var("MODEL_INPUT_SHAPE")
-            .context("MODEL_INPUT_SHAPE variable not found")?
-        );
-        let model_input_shape: [i64; 3] = model_input_shape
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Input must be exactly 3 in length (e.g. 3, 640, 640)"))?;
+        // Model
+        let model_config = ModelConfig { 
+            name: env::var("MODEL_NAME")
+                .context("MODEL_NAME variable not found")?,
 
-        // Model output
-        let model_output_shape: Vec<i64> = AppConfig::parse_list(
-            &env::var("MODEL_OUTPUT_SHAPE")
-            .context("MODEL_OUTPUT_SHAPE variable not found")?
-        );
-        let model_output_shape: [i64; 2] = model_output_shape
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Output must be exactly 2 in length (e.g. 84, 8400)"))?;
+            version: env::var("MODEL_VERSION")
+            .context("MODEL_VERSION variable not found")?,
+
+            input_name: env::var("MODEL_INPUT_NAME")
+            .context("MODEL_INPUT_NAME variable not found")?,
+
+            input_shape: AppConfig::parse_list(
+                &env::var("MODEL_INPUT_SHAPE")
+                .context("MODEL_INPUT_SHAPE variable not found")?
+            )
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Input must be exactly 3 in length (e.g. 3, 640, 640)"))?,
+
+            output_name: env::var("MODEL_OUTPUT_NAME")
+                .context("MODEL_OUTPUT_NAME variable not found")?,
+
+            output_shape: AppConfig::parse_list(
+                &env::var("MODEL_OUTPUT_SHAPE")
+                .context("MODEL_OUTPUT_SHAPE variable not found")?
+            )
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Output must be exactly 2 in length (e.g. 84, 8400)"))?,
+
+            max_batch_size: env::var("MODEL_MAX_BATCH_SIZE")
+                .context("MODEL_MAX_BATCH_SIZE variable not found")?
+                .parse()
+                .context("MODEL_MAX_BATCH_SIZE must be a positive number")?,
+
+            perf_batch_sizes: AppConfig::parse_list(
+                &env::var("MODEL_PERF_BATCH_SIZES")
+                    .context("MODEL_PERF_BATCH_SIZES variable not found")?
+            ),
+
+            precision: env::var("MODEL_PRECISION")
+                .context("MODEL_PRECISION variable not found")?
+                .parse()
+                .context("Must be valid precision")?
+        };
 
         // Detection processing
         let nms_iou_threshold: f32  = env::var("NMS_IOU_THRESHOLD")
@@ -167,69 +200,62 @@ impl AppConfig {
             environment,
             gpu_name,
             source_image_test,
-            source_ids,
-            source_confs,
-            source_conf_default,
-            source_inf_frames,
-            source_inf_frame_default,
+            sources_config,
             triton_url,
             triton_models_dir,
-            model_name,
-            model_version,
-            model_input_name,
-            model_input_shape,
-            model_output_name,
-            model_output_shape,
-            model_precision,
+            model_config,
             nms_iou_threshold
         })
     }
 
     /// Loads environment variables from a local .env file
     fn load_env_file(environment: Environment) -> Result<()> {
-        let base_dir = Path::new(file!()).parent()
-            .context("Error getting config parent directory")?;
-
         let env_file = match environment {
             Environment::Production => ".env",
             Environment::NonProduction => ".env"
         };
 
-        let env_path = base_dir.join(format!("../secrets/{}", env_file))
-            .canonicalize()
-            .context("Local environment variable not found!")?;
+        // Path relative to cwd
+        let env_file = format!("secrets/{}", env_file);
+        let env_path = Path::new(&env_file);
         
         // Load variables to environment
         from_path(env_path)
-            .expect("Error loading local env file");
+            .context("Error loading local env file")?;
 
         Ok(())
     }
 
     /// Initiates structured logging
-    fn init_logging() {
+    fn init_logging(local: bool) {
         let file_appender = RollingFileAppender::new(Rotation::NEVER, "logs", "app.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
-        .with(
-            // File layer - JSON format
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_timer(fmt::time::UtcTime::rfc_3339())
-                .with_writer(non_blocking)
-        )
-        .with(
-            // Console layer - pretty format
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_timer(fmt::time::UtcTime::rfc_3339())
-                .with_writer(std::io::stdout)
-        )
-        .init();
+        // Append logging to local file
+        let file_layer = if local {
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_timer(fmt::time::UtcTime::rfc_3339())
+                    .with_writer(non_blocking)
+            )
+        } else {
+            None
+        };
 
-    std::mem::forget(_guard);
+        tracing_subscriber::registry()
+            .with(EnvFilter::from_default_env())
+            .with(
+                // Console layer - pretty format
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_timer(fmt::time::UtcTime::rfc_3339())
+                    .with_writer(std::io::stdout)
+            )
+            .with(file_layer)
+            .init();
+
+        std::mem::forget(_guard);
     }
 
     /// Parses environment variables as an hashmap
@@ -271,19 +297,19 @@ impl AppConfig {
         for source_id in source_ids.iter() {
             source_confs.insert(
                 source_id.to_string(), 
-                self.source_conf_default()
+                self.sources_config.conf_default
             );
 
             source_inf_frames.insert(
                 source_id.to_string(), 
-                self.source_inf_frame_default()
+                self.sources_config.inf_frame_default
             );
         }
 
         // Set to config
-        self.source_ids = source_ids;
-        self.source_confs = source_confs;
-        self.source_inf_frames = source_inf_frames;
+        self.sources_config.ids = source_ids;
+        self.sources_config.confs = source_confs;
+        self.sources_config.inf_frames = source_inf_frames;
     }
 }
 
@@ -304,24 +330,8 @@ impl AppConfig {
         &self.source_image_test
     }
 
-    pub fn source_ids(&self) -> &Vec<String> {
-        &self.source_ids
-    }
-
-    pub fn source_confs(&self) -> &HashMap<String, f32> {
-        &self.source_confs
-    }
-
-    pub fn source_conf_default(&self) -> f32 {
-        self.source_conf_default
-    }
-
-    pub fn source_inf_frames(&self) -> &HashMap<String, usize> {
-        &self.source_inf_frames
-    }
-
-    pub fn source_inf_frame_default(&self) -> usize {
-        self.source_inf_frame_default
+    pub fn sources_config(&self) -> &SourcesConfig {
+        &self.sources_config
     }
 
     pub fn triton_url(&self) -> &str {
@@ -332,32 +342,8 @@ impl AppConfig {
         &self.triton_models_dir
     }
 
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-
-    pub fn model_version(&self) -> &str {
-        &self.model_version
-    }
-
-    pub fn model_input_name(&self) -> &str {
-        &self.model_input_name
-    }
-
-    pub fn model_input_shape(&self) -> &[i64; 3] {
-        &self.model_input_shape
-    }
-
-    pub fn model_output_name(&self) -> &str {
-        &self.model_output_name
-    }
-
-    pub fn model_output_shape(&self) -> &[i64; 2] {
-        &self.model_output_shape
-    }
-
-    pub fn model_precision(&self) -> InferencePrecision {
-        self.model_precision
+    pub fn model_config(&self) -> &ModelConfig {
+        &self.model_config
     }
 
     pub fn nms_iou_threshold(&self) -> f32 {

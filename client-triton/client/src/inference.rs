@@ -17,7 +17,7 @@ use anyhow::{self, Result, Context};
 use tokio::time::{Duration, interval, Instant};
 
 // Custom modules
-use crate::utils::config::AppConfig;
+use crate::utils::config::{AppConfig, ModelConfig};
 pub mod processing;
 pub mod source;
 use crate::utils;
@@ -43,13 +43,7 @@ pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
     // Create new instance
     let client_instance = InferenceModel::new(
         app_config.triton_url().to_string(),
-        app_config.model_name().to_string(), 
-        app_config.model_version().to_string(), 
-        app_config.model_input_name().to_string(), 
-        app_config.model_input_shape().clone(),
-        app_config.model_output_name().to_string(), 
-        app_config.model_output_shape().clone(),
-        app_config.model_precision(),
+        app_config.model_config().clone(),
         app_config.nms_iou_threshold()
     )
         .await
@@ -141,13 +135,7 @@ impl InferenceResult {
 pub struct InferenceModel {
     client: Client,
     triton_url: String,
-    model_name: String,
-    model_version: String,
-    input_name: String,
-    input_shape: [i64; 3],
-    output_name: String,
-    output_shape: [i64; 2],
-    precision: InferencePrecision,
+    model_config: ModelConfig,
     nms_iou_threshold: f32,
     base_request: ModelInferRequest,
     stats_handle: tokio::task::JoinHandle<()>
@@ -161,13 +149,7 @@ impl InferenceModel {
     /// Reports statistics about GPU utilization
     pub async fn new(
         triton_url: String,
-        model_name: String, 
-        model_version: String, 
-        input_name: String, 
-        input_shape: [i64; 3],
-        output_name: String, 
-        output_shape: [i64; 2],
-        precision: InferencePrecision,
+        model_config: ModelConfig,
         nms_iou_threshold: f32
     ) -> Result<Self> {
         //Create client instance
@@ -186,17 +168,17 @@ impl InferenceModel {
 
         // Create base inference request
         let mut batch_input_shape = vec![1];
-        batch_input_shape.extend(&input_shape);
+        batch_input_shape.extend(&model_config.input_shape);
 
         let base_request = ModelInferRequest {
-            model_name: model_name.clone(),
-            model_version: model_version.clone(),
+            model_name: model_config.name.to_string(),
+            model_version: model_config.version.to_string(),
             id: String::new(),
             parameters: HashMap::new(),
             inputs: vec![
                 InferInputTensor {
-                    name: input_name.clone(), // Adjust based on your model
-                    datatype: precision.to_string(),
+                    name: model_config.input_name.to_string(),
+                    datatype: model_config.precision.to_string(),
                     shape: batch_input_shape,
                     parameters: HashMap::new(),
                     contents: None
@@ -204,7 +186,7 @@ impl InferenceModel {
             ],
             outputs: vec![
                 InferRequestedOutputTensor {
-                    name: output_name.clone(), // Adjust based on your model
+                    name: model_config.output_name.to_string(),
                     parameters: HashMap::new(),
                 }
             ],
@@ -263,13 +245,7 @@ impl InferenceModel {
         Ok(Self { 
             client,
             triton_url,
-            model_name,
-            model_version,
-            input_name,
-            input_shape,
-            output_name,
-            output_shape,
-            precision,
+            model_config,
             nms_iou_threshold,
             base_request,
             stats_handle
@@ -281,7 +257,7 @@ impl InferenceModel {
         // Unload previous instances of model we're about to load
         self.client.repository_model_unload(RepositoryModelUnloadRequest { 
             repository_name: "".to_string(), 
-            model_name: self.model_name.clone(), 
+            model_name: self.model_config.name.to_string(), 
             parameters: HashMap::new()
         })
             .await
@@ -289,25 +265,25 @@ impl InferenceModel {
 
         Ok(())
     }
-
+    
     /// Loads given amount of instances of a given model
     pub async fn load_model(&self, instances: usize) -> Result<()> {
         let model_config = json!({
-            "name": self.model_name,
+            "name": &self.model_config.name,
             "platform": "tensorrt_plan",
-            "max_batch_size": 16,
+            "max_batch_size": &self.model_config.max_batch_size,
             "input": [
                 {
-                    "name": &self.input_name,
-                    "data_type": format!("TYPE_{}", self.precision.to_string()),
-                    "dims": &self.input_shape
+                    "name": &self.model_config.input_name,
+                    "data_type": format!("TYPE_{}", &self.model_config.precision.to_string()),
+                    "dims": &self.model_config.input_shape
                 }
             ],
             "output": [
                 {
-                    "name": self.output_name,
-                    "data_type": format!("TYPE_{}", self.precision.to_string()),
-                    "dims": &self.output_shape
+                    "name": &self.model_config.output_name,
+                    "data_type": format!("TYPE_{}", &self.model_config.precision.to_string()),
+                    "dims": &self.model_config.output_shape
                 }
             ],
             "instance_group": [
@@ -319,7 +295,7 @@ impl InferenceModel {
             ],
             "dynamic_batching": {
                 "max_queue_delay_microseconds": 500,
-                "preferred_batch_size": [2, 4, 8, 12, 16]
+                "preferred_batch_size": &self.model_config.perf_batch_sizes
             },
             "optimization": {
                 "execution_accelerators": {
@@ -328,7 +304,7 @@ impl InferenceModel {
                         "name": "tensorrt",
                         "parameters": {
                             "key": "precision_mode",
-                            "value": self.precision.to_string()
+                            "value": &self.model_config.precision.to_string()
                         }
                     }
                 ]
@@ -349,9 +325,9 @@ impl InferenceModel {
                     "name": "warmup_random",
                     "batch_size": 10,
                     "inputs":  {
-                        &self.input_name: {
-                            "dims": &self.input_shape,
-                            "data_type": format!("TYPE_{}", self.precision.to_string()),
+                        &self.model_config.input_name: {
+                            "dims": &self.model_config.input_shape,
+                            "data_type": format!("TYPE_{}", &self.model_config.precision.to_string()),
                             "random_data": true
                         }
                     }
@@ -368,7 +344,7 @@ impl InferenceModel {
         // Load selected model
         self.client.repository_model_load(RepositoryModelLoadRequest { 
             repository_name: "".to_string(), 
-            model_name: self.model_name.clone(), 
+            model_name: self.model_config.name.to_string(), 
             parameters: parameters
         })
             .await
@@ -377,11 +353,11 @@ impl InferenceModel {
         Ok(())
     }
 
-    /// Performs inference on a raw image, returning raw model results
-    pub async fn infer(&self, image: Vec<u8>) -> Result<Vec<u8>> {
+    /// Performs inference on a raw input, returning raw model results
+    pub async fn infer(&self, raw_input: Vec<u8>) -> Result<Vec<u8>> {
         // Create new inference request
         let mut inference_request = self.base_request.clone();
-        inference_request.raw_input_contents.push(image);
+        inference_request.raw_input_contents.push(raw_input);
 
         // Perform inference
         let inference_result = self.client.model_infer(inference_request)
@@ -393,7 +369,7 @@ impl InferenceModel {
             inference_result.raw_output_contents
                 .into_iter()
                 .next()
-                .context("Error getting inference results for image")?
+                .context("Error getting inference results for raw input")?
         )
     }
 
@@ -418,32 +394,8 @@ impl InferenceModel {
         &self.triton_url
     }
 
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-
-    pub fn model_version(&self) -> &str {
-        &self.model_version
-    }
-
-    pub fn input_name(&self) -> &str {
-        &self.input_name
-    }
-
-    pub fn input_shape(&self) -> &[i64; 3] {
-        &self.input_shape
-    }
-
-    pub fn output_name(&self) -> &str {
-        &self.output_name
-    }
-
-    pub fn output_shape(&self) -> &[i64; 2] {
-        &self.output_shape
-    }
-
-    pub fn precision(&self) -> InferencePrecision {
-        self.precision
+    pub fn model_config(&self) -> &ModelConfig {
+        &self.model_config
     }
 
     pub fn nms_iou_threshold(&self) -> f32 {
@@ -452,6 +404,10 @@ impl InferenceModel {
 
     pub fn base_request(&self) -> &ModelInferRequest {
         &self.base_request
+    }
+
+    pub fn stats_handle(&self) -> &tokio::task::JoinHandle<()> {
+        &self.stats_handle
     }
 }
 
