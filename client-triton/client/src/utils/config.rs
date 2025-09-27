@@ -11,7 +11,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 // Custom modules
-use crate::inference::InferencePrecision;
+use crate::inference::{InferencePrecision, InferenceModelType};
 use crate::utils;
 
 /// Represents the local environment the codebase is on
@@ -24,25 +24,51 @@ pub enum Environment {
     NonProduction
 }
 
+impl FromStr for Environment {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_uppercase().as_str() {
+            "NP" => Ok(Environment::NonProduction),
+            "PROD" => Ok(Environment::Production),
+            _ => anyhow::bail!("Invalid environment type")
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ModelConfig {
-    pub name: String,
-    pub version: String,
+    pub model_type: InferenceModelType,
     pub input_name: String,
-    pub input_shape: [i64; 3],
+    pub input_shape: Vec<i64>,
     pub output_name: String,
-    pub output_shape: [i64; 2],
+    pub output_shape: Vec<i64>,
     pub max_batch_size: usize,
     pub perf_batch_sizes: Vec<usize>,
     pub precision: InferencePrecision
 }
 
+#[derive(Clone)]
 pub struct SourcesConfig {
-    pub ids: Vec<String>,
-    pub confs: HashMap<String, f32>,
+    pub sources: HashMap<String, SourceConfig>,
     pub conf_default: f32,
-    pub inf_frames: HashMap<String, usize>,
-    pub inf_frame_default: usize
+    pub inf_frame_default: usize,
+    pub nms_iou_default: f32
+}
+
+#[derive(Clone)]
+pub struct SourceConfig {
+    pub inf_frame: usize,
+    pub conf_threshold: f32,
+    pub nms_iou_threshold: f32
+}
+
+#[derive(Clone)]
+pub struct TritonConfig {
+    pub url: String,
+    pub models_dir: String,
+    pub model_name: String,
+    pub model_version: String
 }
 
 /// Represents all the configuation variables used by the application
@@ -50,161 +76,151 @@ pub struct AppConfig {
     local: bool,
     environment: Environment,
     gpu_name: String,
-    source_image_test: String,
     sources_config: SourcesConfig,
-    triton_url: String,
-    triton_models_dir: String,
+    triton_config: TritonConfig,
     model_config: ModelConfig,
-    nms_iou_threshold: f32
 }
 
 impl AppConfig {
     /// Creates a new instance of the configuration object
-    pub fn new(local: bool, environment: Environment) -> Result<Self> {
+    pub fn new() -> Result<Self> {
+        let app_local: bool = env::var("APP_LOCAL")
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or(false);
+
+        let app_env: Environment = env::var("APP_ENV")
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or(Environment::NonProduction);
+
         // Load variables from local env file
-        if local {
-            AppConfig::load_env_file(environment)?;
+        if app_local {
+            AppConfig::load_env_file(app_env)?;
         }
 
         // Initiate app logging
-        AppConfig::init_logging(local);
+        AppConfig::init_logging(app_local);
 
         // GPU information
         let gpu_name = utils::get_gpu_name()
             .context("Error getting GPU name")?;
 
         // Streams
-        let source_image_test = env::var("SOURCE_IMAGE_TEST")
-            .context("SOURCE_IMAGE_TEST variable not found")?;
         let source_ids: Vec<String> = AppConfig::parse_list(
             &env::var("SOURCE_IDS")
             .context("SOURCES_IDS variable not found")?
         );
+        let mut sources_config = SourcesConfig {
+            sources: HashMap::new(),
+            conf_default: env::var("SOURCE_CONF_DEFAULT")
+                .unwrap_or("0.85".to_string())
+                .parse()
+                .context("SOURCE_CONF_DEFAULT must be a float")?,
+            inf_frame_default: env::var("SOURCE_INF_FRAME_DEFAULT")
+                .unwrap_or("1".to_string())
+                .parse()
+                .context("SOURCE_INF_FRAME_DEFAULT must be a positive integer")?,
+            nms_iou_default: env::var("SOURCE_NMS_IOU_DEFAULT")
+                .unwrap_or("0.50".to_string())
+                .parse()
+                .context("SOURCE_NMS_IOU_DEFAULT must be a float")?
+        };
 
-        // Append confidence threshold for each source
-        // Check if source has a prefrred setting and assign default value if not
-        let mut source_confs: HashMap<String, f32> = AppConfig::parse_key_values(
+        let source_confs: HashMap<String, f32> = AppConfig::parse_key_values(
             &env::var("SOURCE_CONFS")
             .unwrap_or("".to_string())
         );
-        let source_conf_default: f32  = env::var("SOURCE_CONF_DEFAULT")
-            .context("SOURCE_CONF_DEFAULT variable not found")?
-            .parse()
-            .context("SOURCE_CONF_DEFAULT must be a float")?;
-
-        for source in source_ids.iter() {
-            let valid = source_confs
-                .get(source)
-                .map(|v| (0.0..=1.0).contains(v))
-                .unwrap_or(false);
-
-            if !valid {
-                source_confs.insert(
-                    source.to_string(), 
-                    source_conf_default
-                );
-            }
-        }
-
-        // Append setting for what frame we want to send inference on for each source
-        // Check if source has a prefrred setting and assign default value if not
-        let mut source_inf_frames: HashMap<String, usize> = AppConfig::parse_key_values(
+        let source_inf_frames: HashMap<String, usize> = AppConfig::parse_key_values(
             &env::var("SOURCE_INF_FRAMES")
             .unwrap_or("".to_string())
         );
-        let source_inf_frame_default: usize  = env::var("SOURCE_INF_FRAME_DEFAULT")
-            .context("SOURCE_INF_FRAME_DEFAULT variable not found")?
-            .parse()
-            .context("SOURCE_INF_FRAME_DEFAULT must be a positive integer")?;
-        
+        let source_nms_ious: HashMap<String, f32> = AppConfig::parse_key_values(
+            &env::var("SOURCE_NMS_IOUS")
+            .unwrap_or("".to_string())
+        );
+
+        // Check if source has a prefrred setting and assign default value if not
+        let mut sources: HashMap<String, SourceConfig> = HashMap::new();
         for source in source_ids.iter() {
-            let valid = source_inf_frames
+            let conf_threshold: f32 = source_confs
                 .get(source)
-                .map(|v| (0..=30).contains(v))
-                .unwrap_or(false);
-
-            if !valid {
-                source_inf_frames.insert(
-                    source.to_string(), 
-                    source_inf_frame_default
-                );
-            }
+                .cloned()
+                .filter(|&x| x >= 0.00 && x <= 1.00)
+                .unwrap_or(sources_config.conf_default);
+            let inf_frame: usize = source_inf_frames
+                .get(source)
+                .cloned()
+                .filter(|&x| x <= 30)
+                .unwrap_or(sources_config.inf_frame_default);
+            let nms_iou_threshold: f32 = source_nms_ious
+                .get(source)
+                .cloned()
+                .filter(|&x| x >= 0.00 && x <= 1.00)
+                .unwrap_or(sources_config.nms_iou_default);
+            
+            sources.insert(
+                source.clone(), 
+                SourceConfig {
+                    conf_threshold,
+                    inf_frame,
+                    nms_iou_threshold
+                }
+            );
         }
-
-        let sources_config = SourcesConfig {
-            ids: source_ids,
-            confs: source_confs,
-            conf_default: source_conf_default,
-            inf_frames: source_inf_frames,
-            inf_frame_default: source_inf_frame_default
-        };
+        sources_config.sources = sources;
 
         // Triton
-        let triton_url = env::var("TRITON_URL")
-            .context("TRITON_URL variable not found")?;
-        let triton_models_dir = env::var("TRITON_MODELS_DIR")
-            .context("TRITON_MODELS_DIR variable not found")?;
+        let triton_config = TritonConfig {
+            url: env::var("TRITON_URL")
+                .context("TRITON_URL variable not found")?,
+            models_dir: env::var("TRITON_MODELS_DIR")
+                .context("TRITON_MODELS_DIR variable not found")?,
+            model_name: env::var("TRITON_MODEL_NAME")
+                .context("TRITON_MODEL_NAME variable not found")?,
+            model_version: env::var("TRITON_MODEL_VERSION")
+                .context("TRITON_MODEL_VERSION variable not found")?
+        };
 
         // Model
         let model_config = ModelConfig { 
-            name: env::var("MODEL_NAME")
-                .context("MODEL_NAME variable not found")?,
-
-            version: env::var("MODEL_VERSION")
-            .context("MODEL_VERSION variable not found")?,
-
+            model_type: env::var("MODEL_TYPE")
+                .context("MODEL_TYPE variable not found")?
+                .parse()
+                .context("MODEL_TYPE must be a valid model type")?,
             input_name: env::var("MODEL_INPUT_NAME")
-            .context("MODEL_INPUT_NAME variable not found")?,
-
+                .context("MODEL_INPUT_NAME variable not found")?,
             input_shape: AppConfig::parse_list(
-                &env::var("MODEL_INPUT_SHAPE")
-                .context("MODEL_INPUT_SHAPE variable not found")?
-            )
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Input must be exactly 3 in length (e.g. 3, 640, 640)"))?,
-
+                    &env::var("MODEL_INPUT_SHAPE")
+                    .context("MODEL_INPUT_SHAPE variable not found")?
+                ),
             output_name: env::var("MODEL_OUTPUT_NAME")
                 .context("MODEL_OUTPUT_NAME variable not found")?,
-
             output_shape: AppConfig::parse_list(
-                &env::var("MODEL_OUTPUT_SHAPE")
-                .context("MODEL_OUTPUT_SHAPE variable not found")?
-            )
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Output must be exactly 2 in length (e.g. 84, 8400)"))?,
-
+                    &env::var("MODEL_OUTPUT_SHAPE")
+                    .context("MODEL_OUTPUT_SHAPE variable not found")?
+                ),
             max_batch_size: env::var("MODEL_MAX_BATCH_SIZE")
                 .context("MODEL_MAX_BATCH_SIZE variable not found")?
                 .parse()
                 .context("MODEL_MAX_BATCH_SIZE must be a positive number")?,
-
             perf_batch_sizes: AppConfig::parse_list(
-                &env::var("MODEL_PERF_BATCH_SIZES")
+                    &env::var("MODEL_PERF_BATCH_SIZES")
                     .context("MODEL_PERF_BATCH_SIZES variable not found")?
-            ),
-
+                ),
             precision: env::var("MODEL_PRECISION")
                 .context("MODEL_PRECISION variable not found")?
                 .parse()
                 .context("Must be valid precision")?
         };
 
-        // Detection processing
-        let nms_iou_threshold: f32  = env::var("NMS_IOU_THRESHOLD")
-            .context("NMS_IOU_THRESHOLD variable not found")?
-            .parse()
-            .context("NMS_IOU_THRESHOLD must be a float")?;
-
         Ok(Self {
-            local,
-            environment,
+            local: app_local,
+            environment: app_env,
             gpu_name,
-            source_image_test,
             sources_config,
-            triton_url,
-            triton_models_dir,
+            triton_config,
             model_config,
-            nms_iou_threshold
         })
     }
 
@@ -290,26 +306,22 @@ impl AppConfig {
             .collect()
     }
 
-    pub fn set_source_ids(&mut self, source_ids: Vec<String>) {
-        let mut source_confs: HashMap<String, f32> = HashMap::new();
-        let mut source_inf_frames: HashMap<String, usize> = HashMap::new();
+    pub fn set_source_ids(&mut self, ids: &[String]) {
+        let mut sources: HashMap<String, SourceConfig> = HashMap::new();
 
-        for source_id in source_ids.iter() {
-            source_confs.insert(
-                source_id.to_string(), 
-                self.sources_config.conf_default
-            );
-
-            source_inf_frames.insert(
-                source_id.to_string(), 
-                self.sources_config.inf_frame_default
+        for source in ids.iter() {
+            sources.insert(
+                source.clone(), 
+                SourceConfig {
+                    conf_threshold: self.sources_config().conf_default,
+                    inf_frame: self.sources_config().inf_frame_default,
+                    nms_iou_threshold: self.sources_config().nms_iou_default
+                }
             );
         }
 
         // Set to config
-        self.sources_config.ids = source_ids;
-        self.sources_config.confs = source_confs;
-        self.sources_config.inf_frames = source_inf_frames;
+        self.sources_config.sources = sources;
     }
 }
 
@@ -326,27 +338,15 @@ impl AppConfig {
         &self.gpu_name
     }
 
-    pub fn source_image_test(&self) -> &str {
-        &self.source_image_test
-    }
-
     pub fn sources_config(&self) -> &SourcesConfig {
         &self.sources_config
     }
 
-    pub fn triton_url(&self) -> &str {
-        &self.triton_url
-    }
-
-    pub fn triton_models_dir(&self) -> &str {
-        &self.triton_models_dir
+    pub fn triton_config(&self) -> &TritonConfig {
+        &self.triton_config
     }
 
     pub fn model_config(&self) -> &ModelConfig {
         &self.model_config
-    }
-
-    pub fn nms_iou_threshold(&self) -> f32 {
-        self.nms_iou_threshold
     }
 }

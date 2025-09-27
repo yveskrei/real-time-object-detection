@@ -17,10 +17,13 @@ use anyhow::{self, Result, Context};
 use tokio::time::{Duration, interval, Instant};
 
 // Custom modules
-use crate::utils::config::{AppConfig, ModelConfig};
-pub mod processing;
 pub mod source;
-use crate::utils;
+pub mod queue;
+use crate::utils::{
+    self,
+    GPUStats,
+    config::{AppConfig, ModelConfig, TritonConfig}
+};
 
 /// Static singleton instance for model inference
 pub static INFERENCE_MODEL: OnceCell<Arc<InferenceModel>> = OnceCell::const_new();
@@ -42,9 +45,8 @@ pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
 
     // Create new instance
     let client_instance = InferenceModel::new(
-        app_config.triton_url().to_string(),
+        app_config.triton_config().clone(),
         app_config.model_config().clone(),
-        app_config.nms_iou_threshold()
     )
         .await
         .context("Error creating model client")?;
@@ -109,24 +111,21 @@ impl FromStr for InferencePrecision {
     }
 }
 
-/// Represents a single bbox instance from the model inference results
-#[derive(Clone, Copy)]
-pub struct InferenceResult {
-    pub bbox: [f32; 4],
-    pub class: usize, 
-    pub score: f32
+/// Represents type of inference model
+#[derive(Clone)]
+pub enum InferenceModelType {
+    YOLO,
+    DINO
 }
 
-impl InferenceResult {
-    pub fn class_name(&self) -> &'static str {
-        match self.class {
-            0 => "person",
-            1 => "bicycle",
-            2 => "car",
-            3 => "motorcycle",
-            4 => "airplane",
-            5 => "bus",
-            _ => Box::leak(self.class.to_string().into_boxed_str())
+impl FromStr for InferenceModelType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_uppercase().as_str() {
+            "YOLO" => Ok(InferenceModelType::YOLO),
+            "DINO" => Ok(InferenceModelType::DINO),
+            _ => anyhow::bail!("Invalid model type")
         }
     }
 }
@@ -134,9 +133,8 @@ impl InferenceResult {
 /// Represents an instance of an inference model
 pub struct InferenceModel {
     client: Client,
-    triton_url: String,
+    triton_config: TritonConfig,
     model_config: ModelConfig,
-    nms_iou_threshold: f32,
     base_request: ModelInferRequest,
     stats_handle: tokio::task::JoinHandle<()>
 }
@@ -148,12 +146,11 @@ impl InferenceModel {
     /// Initiate all values for fast inference, including a pre-made request body for inference
     /// Reports statistics about GPU utilization
     pub async fn new(
-        triton_url: String,
-        model_config: ModelConfig,
-        nms_iou_threshold: f32
+        triton_config: TritonConfig,
+        model_config: ModelConfig
     ) -> Result<Self> {
         //Create client instance
-        let client = Client::new(&triton_url, None)
+        let client = Client::new(&triton_config.url, None)
             .await
             .context("Error creating triton client instance")?;
 
@@ -171,8 +168,8 @@ impl InferenceModel {
         batch_input_shape.extend(&model_config.input_shape);
 
         let base_request = ModelInferRequest {
-            model_name: model_config.name.to_string(),
-            model_version: model_config.version.to_string(),
+            model_name: triton_config.model_name.to_string(),
+            model_version: triton_config.model_version.to_string(),
             id: String::new(),
             parameters: HashMap::new(),
             inputs: vec![
@@ -204,49 +201,35 @@ impl InferenceModel {
                 
                 // NVML Is execution blocking, running it seperately
                 let gpu_stats = tokio::task::spawn_blocking(|| {
-                    utils::get_gpu_statistics()
+                    let result = utils::get_gpu_statistics();
+
+                    match result {
+                        Ok(stats) => {
+                            InferenceModel::process_gpu_stats(stats);
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                error=e.to_string(),
+                                "Error getting GPU utilization information"
+                            )
+                        }
+                    }
                 }).await;
 
-                match gpu_stats {
-                    Ok(result) => {
-                        match result {
-                            Ok(stats) => {
-                                tracing::info!(
-                                    name=stats.name,
-                                    uuid=stats.uuid,
-                                    serial=stats.serial,
-                                    memory_total_mb=stats.memory_total,
-                                    memory_used_mb=stats.memory_used,
-                                    memory_free_mb=stats.memory_free,
-                                    util_perc=stats.util_perc,
-                                    memory_perc=stats.memory_perc,
-                                    "GPU utilization information"
-                                );
-                            },
-                            Err(e) => {
-                                tracing::warn!(
-                                    error=e.to_string(),
-                                    "Error getting GPU utilization information"
-                                )
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            error=e.to_string(),
-                            "Error getting GPU utilization information"
-                        )
-                    }
-                };
+                if let Err(e) = gpu_stats {
+                    tracing::warn!(
+                        error=e.to_string(),
+                        "Error getting GPU utilization information"
+                    )
+                }
 
             }
         });
 
         Ok(Self { 
             client,
-            triton_url,
+            triton_config,
             model_config,
-            nms_iou_threshold,
             base_request,
             stats_handle
         })
@@ -257,7 +240,7 @@ impl InferenceModel {
         // Unload previous instances of model we're about to load
         self.client.repository_model_unload(RepositoryModelUnloadRequest { 
             repository_name: "".to_string(), 
-            model_name: self.model_config.name.to_string(), 
+            model_name: self.triton_config().model_name.to_string(), 
             parameters: HashMap::new()
         })
             .await
@@ -269,7 +252,7 @@ impl InferenceModel {
     /// Loads given amount of instances of a given model
     pub async fn load_model(&self, instances: usize) -> Result<()> {
         let model_config = json!({
-            "name": &self.model_config.name,
+            "name": &self.triton_config().model_name.to_string(),
             "platform": "tensorrt_plan",
             "max_batch_size": &self.model_config.max_batch_size,
             "input": [
@@ -294,7 +277,7 @@ impl InferenceModel {
                 }
             ],
             "dynamic_batching": {
-                "max_queue_delay_microseconds": 500,
+                "max_queue_delay_microseconds": 1500,
                 "preferred_batch_size": &self.model_config.perf_batch_sizes
             },
             "optimization": {
@@ -344,7 +327,7 @@ impl InferenceModel {
         // Load selected model
         self.client.repository_model_load(RepositoryModelLoadRequest { 
             repository_name: "".to_string(), 
-            model_name: self.model_config.name.to_string(), 
+            model_name: self.triton_config().model_name.to_string(), 
             parameters: parameters
         })
             .await
@@ -354,7 +337,8 @@ impl InferenceModel {
     }
 
     /// Performs inference on a raw input, returning raw model results
-    pub async fn infer(&self, raw_input: Vec<u8>) -> Result<Vec<u8>> {
+    pub async fn infer(&self, raw_input: Vec<u8>) -> Result<Vec<u8>> {        
+        // tracing::info!("inference!");
         // Create new inference request
         let mut inference_request = self.base_request.clone();
         inference_request.raw_input_contents.push(raw_input);
@@ -383,6 +367,20 @@ impl InferenceModel {
 
         }
     }
+
+    pub fn process_gpu_stats(stats: GPUStats) {
+        tracing::info!(
+            name=stats.name,
+            uuid=stats.uuid,
+            serial=stats.serial,
+            memory_total_mb=stats.memory_total,
+            memory_used_mb=stats.memory_used,
+            memory_free_mb=stats.memory_free,
+            util_perc=stats.util_perc,
+            memory_perc=stats.memory_perc,
+            "GPU utilization information"
+        );
+    }
 }
 
 impl InferenceModel {
@@ -390,16 +388,12 @@ impl InferenceModel {
         &self.client
     }
 
-    pub fn triton_url(&self) -> &str {
-        &self.triton_url
+    pub fn triton_config(&self) -> &TritonConfig {
+        &self.triton_config
     }
 
     pub fn model_config(&self) -> &ModelConfig {
         &self.model_config
-    }
-
-    pub fn nms_iou_threshold(&self) -> f32 {
-        self.nms_iou_threshold
     }
 
     pub fn base_request(&self) -> &ModelInferRequest {

@@ -6,16 +6,23 @@ use std::sync::atomic::{Ordering, AtomicU64};
 use std::collections::HashMap;
 use anyhow::{Result, Context};
 use tokio::time::{Duration, interval, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use std::sync::LazyLock;
 
 // Custom modules
-use crate::inference::{self, InferenceFrame, InferenceResult};
-use crate::inference::processing;
-use crate::utils::config::AppConfig;
+use crate::inference::{
+    self, 
+    queue::FixedSizeQueue, 
+    InferenceModelType
+};
+use crate::processing::{self, RawFrame, ResultBBOX, ResultEmbedding};
+use crate::utils::config::{AppConfig, SourceConfig};
 
-/// Static instances of source processors
+// Variables
 pub static PROCESSORS: LazyLock<RwLock<HashMap<String, Arc<SourceProcessor>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+pub static MAX_QUEUE_FRAMES: usize = 5;
+pub static MAX_PARALLEL_FRAME_PROCESSING: usize = 5;
+pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Returns a source processor instance by given stream ID
 pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
@@ -33,25 +40,21 @@ pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor
 pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
     let mut processors: HashMap<String, Arc<SourceProcessor>> = HashMap::new();
 
-    for source_id in app_config.sources_config().ids.iter() {
-        let confidence_threshold = app_config.sources_config().confs
-            .get(source_id)
-            .context("Source does not have confidence threshold setting")?;
-        let inference_frame = app_config.sources_config().inf_frames
-            .get(source_id)
-            .context("Source does not have inference frame setting")?;
+    for source in app_config.sources_config().sources.keys() {
+        let source_config = app_config.sources_config().sources
+            .get(source)
+            .context("Source config is not set")?;
         
         // Start processor
         let processor = Arc::new(
             SourceProcessor::new(
-                source_id.to_string(), 
-                *confidence_threshold, 
-                *inference_frame
+                source.to_string(), 
+                source_config.clone()
             ).await
         );
 
         processors.insert(
-            source_id.to_string(),
+            source.to_string(),
             processor
         );
     }
@@ -63,11 +66,65 @@ pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
 }
 
 /// Responsible for giving information about times at specific parts of inference
-pub struct SourceProcessStats {
+pub struct FrameProcessStats {
+    pub queue: u64,
     pub pre_processing: u64,
     pub inference: u64,
     pub post_processing: u64,
-    pub results: u64
+    pub results: u64,
+    pub processing: u64
+}
+
+pub struct SourceStats {
+    pub frames_total: AtomicU64,
+    pub frames_expected: AtomicU64,
+    pub frames_success: AtomicU64,
+    pub frames_failed: AtomicU64,
+    pub total_queue_time: AtomicU64,
+    pub total_pre_proc_time: AtomicU64,
+    pub total_inference_time: AtomicU64,
+    pub total_post_proc_time: AtomicU64,
+    pub total_results_time: AtomicU64,
+    pub total_processing_time: AtomicU64
+}
+
+impl SourceStats {
+    pub fn new() -> Self {
+        Self {
+            frames_total: AtomicU64::new(0),
+            frames_expected: AtomicU64::new(0),
+            frames_success: AtomicU64::new(0),
+            frames_failed: AtomicU64::new(0),
+            total_queue_time: AtomicU64::new(0),
+            total_pre_proc_time: AtomicU64::new(0),
+            total_inference_time: AtomicU64::new(0),
+            total_post_proc_time: AtomicU64::new(0),
+            total_results_time: AtomicU64::new(0),
+            total_processing_time: AtomicU64::new(0)
+        }
+    }
+
+    pub fn reset(&self) {
+        self.frames_total.store(0, Ordering::Relaxed);
+        self.frames_expected.store(0, Ordering::Relaxed);
+        self.frames_success.store(0, Ordering::Relaxed);
+        self.frames_failed.store(0, Ordering::Relaxed);
+        self.total_queue_time.store(0, Ordering::Relaxed);
+        self.total_pre_proc_time.store(0, Ordering::Relaxed);
+        self.total_inference_time.store(0, Ordering::Relaxed);
+        self.total_post_proc_time.store(0, Ordering::Relaxed);
+        self.total_results_time.store(0, Ordering::Relaxed);
+        self.total_processing_time.store(0, Ordering::Relaxed);
+    }
+
+    pub fn add_stats(&self, stats: &FrameProcessStats) {
+        self.total_queue_time.fetch_add(stats.queue, Ordering::Relaxed);
+        self.total_pre_proc_time.fetch_add(stats.pre_processing, Ordering::Relaxed);
+        self.total_inference_time.fetch_add(stats.inference, Ordering::Relaxed);
+        self.total_post_proc_time.fetch_add(stats.post_processing, Ordering::Relaxed);
+        self.total_results_time.fetch_add(stats.results, Ordering::Relaxed);
+        self.total_processing_time.fetch_add(stats.processing, Ordering::Relaxed);
+    }
 }
 
 /// Responsible for managing inference/processing for each source
@@ -81,25 +138,16 @@ pub struct SourceProcessStats {
 /// rate, having minimal effect on the end user's experience.
 pub struct SourceProcessor {
     // Settings for multi-threading
-    frame_sender: tokio::sync::mpsc::Sender<InferenceFrame>,
+    queue: Arc<FixedSizeQueue<RawFrame>>,
     process_handle: tokio::task::JoinHandle<()>,
     stats_handle: tokio::task::JoinHandle<()>,
 
     // Source specific settings
     source_id: String,
-    confidence_threshold: f32,
-    inference_frame: usize,
+    source_config: SourceConfig,
 
     // Source statistics
-    frames_total: Arc<AtomicU64>,
-    frames_expected: Arc<AtomicU64>,
-    frames_success: Arc<AtomicU64>,
-    frames_failed: Arc<AtomicU64>,
-    total_pre_proc_time: Arc<AtomicU64>,
-    total_inference_time: Arc<AtomicU64>,
-    total_post_proc_time: Arc<AtomicU64>,
-    total_results_time: Arc<AtomicU64>,
-    total_processing_time: Arc<AtomicU64>,
+    source_stats: Arc<SourceStats>
 }
 
 impl SourceProcessor {
@@ -112,111 +160,115 @@ impl SourceProcessor {
     /// processing, how many successful/failed frames we have and what is our general success rate 
     pub async fn new(
         source_id: String,
-        confidence_threshold: f32,
-        inference_frame: usize
+        source_config: SourceConfig
     ) -> Self {
         // Create global counters
-        let frames_total = Arc::new(AtomicU64::new(0));
-        let frames_expected = Arc::new(AtomicU64::new(0));
-        let frames_success = Arc::new(AtomicU64::new(0));
-        let frames_failed = Arc::new(AtomicU64::new(0));
-        let total_pre_proc_time = Arc::new(AtomicU64::new(0));
-        let total_inference_time = Arc::new(AtomicU64::new(0));
-        let total_post_proc_time = Arc::new(AtomicU64::new(0));
-        let total_results_time = Arc::new(AtomicU64::new(0));
-        let total_processing_time = Arc::new(AtomicU64::new(0));
+        let source_stats = Arc::new(SourceStats::new());
         
-        // Spawn seperate threadpool channel for inference
-        // Set inference queue to 10 frames. it will fail adding when sending more
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<InferenceFrame>(10);
+        // Create a queue for frames. We set a maximum number of frames possible to be in queue at a given time
+        // When the limit reaches, it drops the oldest frame in the queue, making it possible for new frames
+        // to be added to the queue and be processed.
+        let queue_stats = Arc::clone(&source_stats);
+        let queue_drop_callback = move |_: &RawFrame| {
+            queue_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
+        };
+        let source_queue = Arc::new(FixedSizeQueue::<RawFrame>::new(3, Some(queue_drop_callback)));
+        let queue_parallel_limit = Arc::new(Semaphore::new(5));
+        
+        // Create a seperate task for handling frames - performing inference
+        let process_queue_parallel_limit = Arc::clone(&queue_parallel_limit);
+        let process_source_queue = Arc::clone(&source_queue);
         let process_source_id = source_id.clone();
-        let process_frames_success = frames_success.clone();
-        let process_frames_failed = frames_failed.clone();
-        let process_total_pre_proc_time = total_pre_proc_time.clone();
-        let process_total_inference_time = total_inference_time.clone();
-        let process_total_post_proc_time = total_post_proc_time.clone();
-        let process_total_results_time = total_results_time.clone();
-        let process_total_processing_time = total_processing_time.clone();
+        let process_source_config = source_config.clone();
+        let process_source_stats = Arc::clone(&source_stats);
 
         let process_handle = tokio::spawn(async move {
-            while let Some(frame) = rx.recv().await {
-                let process_result = Self::process_frame_internal(
-                    &process_source_id,
-                    &frame,
-                    confidence_threshold
-                ).await;
+            let frame_process: Result<()> = async {
+                loop {
+                    // Try to acquire permit without blocking
+                    match Arc::clone(&process_queue_parallel_limit).try_acquire_owned() {
+                        Ok(permit) => {
+                            // Only pull from queue when we have a permit available
+                            if let Some(frame) = process_source_queue.receiver.recv().await {
+                                // Move values to the new thread
+                                let process_source_id = process_source_id.clone();
+                                let process_source_config = process_source_config.clone();
+                                let process_source_stats = Arc::clone(&process_source_stats);
 
-                match process_result {
-                    Ok(stats) => {
-                        process_frames_success.fetch_add(1, Ordering::Relaxed);
+                                // Spawn processing in a new thread with permit
+                                tokio::spawn(async move {
+                                    // Keep permit alive until processing completes
+                                    let _permit = permit;
+                                    
+                                    let process_result = Self::process_frame_internal(
+                                        &process_source_id,
+                                        &process_source_config,
+                                        &frame
+                                    ).await;
 
-                        // Calculate time since frame added to queue
-                        let processing = frame.added.elapsed().as_micros() as u64;
+                                    // Count processing statistics
+                                    process_source_stats.frames_total.fetch_add(1, Ordering::Relaxed);
+                                    process_source_stats.frames_expected.fetch_add(1, Ordering::Relaxed);
+                                    match &process_result {
+                                        Ok(stats) => {
+                                            process_source_stats.frames_success.fetch_add(1, Ordering::Relaxed);
 
-                        // Add inference statistics to counters
-                        process_total_pre_proc_time.fetch_add(stats.pre_processing, Ordering::Relaxed);
-                        process_total_inference_time.fetch_add(stats.inference, Ordering::Relaxed);
-                        process_total_post_proc_time.fetch_add(stats.post_processing, Ordering::Relaxed);
-                        process_total_results_time.fetch_add(stats.results, Ordering::Relaxed);
-                        process_total_processing_time.fetch_add(processing, Ordering::Relaxed);
-                    },
-                    Err(e) => {
-                        process_frames_failed.fetch_add(1, Ordering::Relaxed);
-
-                        tracing::error!(
-                            source_id=process_source_id,
-                            error=e.to_string(),
-                            "error processing source frame"
-                        )
+                                            // Add inference statistics to counters
+                                            process_source_stats.add_stats(&stats);
+                                        },
+                                        Err(_) => {
+                                            process_source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    
+                                    // Handle processing error
+                                    if let Err(e) = process_result {
+                                        tracing::error!(
+                                            source_id=process_source_id,
+                                            error=e.to_string(),
+                                            "error processing source frame"
+                                        )
+                                    };
+                                });
+                            }
+                        }
+                        Err(_) => {
+                            // No permits available - yield control to other tasks
+                            // This prevents busy-waiting while allowing quick retry
+                            tokio::task::yield_now().await;
+                        }
                     }
                 }
+            }.await;
+
+            if let Err(e) = frame_process {
+                tracing::error!(
+                    source_id=process_source_id,
+                    error=e.to_string(),
+                    "Stopped processing frames - due to fatal error"
+                )
             }
         });
 
-        // Spawn seperate task for source statistics
+        // Create a seperate task for printing source statistics
         let stats_source_id = source_id.clone();
-        let stats_inference_frame = inference_frame.clone();
-        let stats_frames_total = frames_total.clone();
-        let stats_frames_expected = frames_expected.clone();
-        let stats_frames_success = frames_success.clone();
-        let stats_frames_failed = frames_failed.clone();
-        let stats_total_pre_proc_time = total_pre_proc_time.clone();
-        let stats_total_inference_time = total_inference_time.clone();
-        let stats_total_post_proc_time = total_post_proc_time.clone();
-        let stats_total_results_time = total_results_time.clone();
-        let stats_total_processing_time = total_processing_time.clone();
-        let stats_interval = Duration::from_secs(1);
+        let stats_source_config = source_config.clone();
+        let stats_source_stats = Arc::clone(&source_stats);
 
         let stats_handle = tokio::spawn(async move {
-            let mut interval = interval(stats_interval);
+            let mut interval = interval(SOURCE_STATS_INTERVAL.clone());
             
             loop {
                 interval.tick().await;
 
                 Self::process_stats_internal(
                     &stats_source_id, 
-                    stats_inference_frame, 
-                    stats_frames_total.load(Ordering::Relaxed), 
-                    stats_frames_expected.load(Ordering::Relaxed), 
-                    stats_frames_success.load(Ordering::Relaxed), 
-                    stats_frames_failed.load(Ordering::Relaxed), 
-                    stats_total_pre_proc_time.load(Ordering::Relaxed), 
-                    stats_total_inference_time.load(Ordering::Relaxed), 
-                    stats_total_post_proc_time.load(Ordering::Relaxed), 
-                    stats_total_results_time.load(Ordering::Relaxed),
-                    stats_total_processing_time.load(Ordering::Relaxed)
+                    &stats_source_config,
+                    &stats_source_stats
                 );
 
                 // Reset statistics
-                stats_frames_total.store(0, Ordering::Relaxed);
-                stats_frames_expected.store(0, Ordering::Relaxed);
-                stats_frames_success.store(0, Ordering::Relaxed);
-                stats_frames_failed.store(0, Ordering::Relaxed);
-                stats_total_pre_proc_time.store(0, Ordering::Relaxed);
-                stats_total_inference_time.store(0, Ordering::Relaxed);
-                stats_total_post_proc_time.store(0, Ordering::Relaxed);
-                stats_total_results_time.store(0, Ordering::Relaxed);
-                stats_total_processing_time.store(0, Ordering::Relaxed);
+                stats_source_stats.reset();
 
             }
         });
@@ -230,147 +282,119 @@ impl SourceProcessor {
         );
         
         Self {
-            frame_sender: tx,
+            queue: source_queue,
             process_handle,
             stats_handle,
             source_id,
-            confidence_threshold,
-            inference_frame,
-            frames_total,
-            frames_expected,
-            frames_success,
-            frames_failed,
-            total_pre_proc_time,
-            total_inference_time,
-            total_post_proc_time,
-            total_results_time,
-            total_processing_time
+            source_config,
+            source_stats
         }
     }
 
     /// Sends inference requests to a seperate thread pool
     pub fn process_frame(&self, raw_frame: Vec<u8>, height: usize, width: usize) {
-        // Send processing request to seperate thread
-        let frames_total = self.frames_total.fetch_add(1, Ordering::Relaxed);
+        let frames_total = self.source_stats.frames_total.load(Ordering::Relaxed);
 
         // Send inference results on every N frame
-        if frames_total % (self.inference_frame as u64) == 0 {
-            // Count frames we actually expected getting
-            self.frames_expected.fetch_add(1, Ordering::Relaxed);
-
-            // Send frame to processing
-            let frame = InferenceFrame {
+        if (frames_total + 1) % (self.source_config.inf_frame as u64) == 0 {
+            // Create new frame object
+            let frame = RawFrame {
                 data: raw_frame,
                 height,
                 width,
                 added: Instant::now()
             };
 
-            if let Err(e) = self.frame_sender.try_send(frame) {
-                self.frames_failed.fetch_add(1, Ordering::Relaxed);
+            // Send new frame to queue
+            if let Err(e) = self.queue.sender.send_sync(frame) {
+                self.source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
 
                 tracing::error!(
                     source_id=&self.source_id,
                     error=e.to_string(),
-                    "frame queue is full"
+                    "source frame queue is full"
                 )
             }
+        } else {
+            // Add to statistics
+            self.source_stats.frames_total.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Populates inference results to third party services
-    pub fn populate_results(source_id: &str, bboxes: &[InferenceResult]) {
-        tracing::info!(
-            source_id=source_id,
-            bboxes=bboxes.len(),
-            "Got bboxes to populate!"
-        )
-    }
-
-
     /// Used to perform inference on a raw frame and return stats about timing
+    #[allow(unreachable_patterns)]
     async fn process_frame_internal(
         source_id: &str,
-        frame: &InferenceFrame, 
-        confidence_threshold: f32
-    ) -> Result<SourceProcessStats> {
+        source_config: &SourceConfig,
+        frame: &RawFrame, 
+    ) -> Result<FrameProcessStats> {
         // Perform inference on raw frame and populate results
         let inference_model = inference::get_inference_model()?;
-        let inference_start = Instant::now();
 
-        // Pre-process raw frame
-        let pre_proc_frame = processing::preprocess_yolo(
-            frame,
-            inference_model.model_config().precision
-        )?;
-        let pre_proc_time = inference_start.elapsed();
+        let stats = match inference_model.model_config().model_type {
+            InferenceModelType::YOLO => {
+                processing::yolo::process_frame(
+                    &inference_model,
+                    &source_id,
+                    &source_config,
+                    &frame
+                ).await?
+            },
+            InferenceModelType::DINO => {
+                processing::dinov2::process_frame(
+                    &inference_model,
+                    &source_id,
+                    &frame
+                ).await?
+            },
+            _ => anyhow::bail!("Model type is not supported for processing!")
+        };
 
-
-        // Perform inference on frame
-        let inference_results = inference_model.infer(pre_proc_frame).await?;
-        let inference_time = inference_start.elapsed() - pre_proc_time;
-
-        // Post-process inference results
-        let bboxes = processing::postprocess_yolo(
-            &inference_results, 
-            frame,
-            &inference_model.model_config().output_shape,
-            inference_model.model_config().precision,
-            confidence_threshold,
-            inference_model.nms_iou_threshold()
-        )?;
-        let post_proc_time = inference_start.elapsed() - inference_time - pre_proc_time;
-
-        // Populate inference results
-        //SourceProcessor::populate_results(&source_id, &bboxes);
-
-        let results_time = inference_start.elapsed() - pre_proc_time - inference_time - post_proc_time;
-
-        Ok(
-            SourceProcessStats {
-                pre_processing: pre_proc_time.as_micros() as u64, 
-                inference: inference_time.as_micros() as u64, 
-                post_processing: post_proc_time.as_micros() as u64, 
-                results: results_time.as_micros() as u64
-            }
-        )
+        Ok(stats)
     }
 
     /// Reports inference statistics for the given source processor
     fn process_stats_internal(
         source_id: &str,
-        inference_frame: usize,
-        total_frames: u64,
-        total_expected: u64,
-        total_success: u64,
-        total_failed: u64,
-        total_pre_proc_time: u64,
-        total_inference_time: u64,
-        total_post_proc_time: u64,
-        total_results_time: u64,
-        total_processing_time: u64
+        source_config: &SourceConfig,
+        source_stats: &SourceStats
     ) {
+        let mut avg_queue: f64 = 0.00;
         let mut avg_pre_proc: f64 = 0.00;
         let mut avg_inference: f64 = 0.00;
         let mut avg_post_proc: f64 = 0.00;
         let mut avg_results: f64 = 0.00;
         let mut avg_processing: f64 = 0.00;
 
-        if total_success > 0 {
-            avg_pre_proc = (total_pre_proc_time as f64) / (total_success as f64);
-            avg_inference = (total_inference_time as f64) / (total_success as f64);
-            avg_post_proc = (total_post_proc_time as f64) / (total_success as f64);
-            avg_results = (total_results_time as f64) / (total_success as f64);
-            avg_processing = (total_processing_time as f64) / (total_success as f64);
+        // Extract values of statistics
+        let frames_total = source_stats.frames_total.load(Ordering::Relaxed) as u64;
+        let frames_expected = source_stats.frames_expected.load(Ordering::Relaxed) as u64;
+        let frames_success = source_stats.frames_success.load(Ordering::Relaxed) as u64;
+        let frames_failed = source_stats.frames_failed.load(Ordering::Relaxed) as u64;
+        let total_queue_time = source_stats.total_queue_time.load(Ordering::Relaxed) as u64;
+        let total_pre_proc_time = source_stats.total_pre_proc_time.load(Ordering::Relaxed) as u64;
+        let total_inference_time = source_stats.total_inference_time.load(Ordering::Relaxed) as u64;
+        let total_post_proc_time = source_stats.total_post_proc_time.load(Ordering::Relaxed) as u64;
+        let total_results_time = source_stats.total_results_time.load(Ordering::Relaxed) as u64;
+        let total_processing_time = source_stats.total_processing_time.load(Ordering::Relaxed) as u64;
+        
+        if frames_success > 0 {
+            avg_queue = (total_queue_time as f64) / (frames_success as f64);
+            avg_pre_proc = (total_pre_proc_time as f64) / (frames_success as f64);
+            avg_inference = (total_inference_time as f64) / (frames_success as f64);
+            avg_post_proc = (total_post_proc_time as f64) / (frames_success as f64);
+            avg_results = (total_results_time as f64) / (frames_success as f64);
+            avg_processing = (total_processing_time as f64) / (frames_success as f64);
         }
 
         tracing::info!(
             source_id=source_id,
-            inference_every_n=inference_frame,
-            total_frames=total_frames,
-            total_expected=total_expected,
-            total_success=total_success,
-            total_failed=total_failed,
+            inference_every_n=source_config.inf_frame,
+            frames_total=frames_total,
+            frames_expected=frames_expected,
+            frames_success=frames_success,
+            frames_failed=frames_failed,
+            avg_queue=avg_queue,
             avg_pre_proc=avg_pre_proc,
             avg_inference=avg_inference,
             avg_post_proc=avg_post_proc,
@@ -378,6 +402,24 @@ impl SourceProcessor {
             avg_processing=avg_processing,
             "inference statistics"
         );
+    }
+
+    /// Populates BBOXes to third party services
+    pub fn populate_bboxes(source_id: &str, bboxes: Vec<ResultBBOX>) {
+        tracing::info!(
+            source_id=source_id,
+            total_bboxes=bboxes.len(),
+            "Got bboxes to populate!"
+        )
+    }
+
+    /// Populates embedding to third party services
+    pub fn populate_embedding(source_id: &str, embedding: ResultEmbedding) {
+        tracing::info!(
+            source_id=source_id,
+            embedding_size=embedding.data.len(),
+            "Got embedding to populate!"
+        )
     }
 }
 
