@@ -22,7 +22,7 @@ use crate::utils::config::{AppConfig, SourceConfig};
 pub static PROCESSORS: LazyLock<RwLock<HashMap<String, Arc<SourceProcessor>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 pub static MAX_QUEUE_FRAMES: usize = 5;
 pub static MAX_PARALLEL_FRAME_PROCESSING: usize = 5;
-pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(1);
+pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Returns a source processor instance by given stream ID
 pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
@@ -172,8 +172,8 @@ impl SourceProcessor {
         let queue_drop_callback = move |_: &RawFrame| {
             queue_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
         };
-        let source_queue = Arc::new(FixedSizeQueue::<RawFrame>::new(3, Some(queue_drop_callback)));
-        let queue_parallel_limit = Arc::new(Semaphore::new(5));
+        let source_queue = Arc::new(FixedSizeQueue::<RawFrame>::new(MAX_QUEUE_FRAMES, Some(queue_drop_callback)));
+        let queue_parallel_limit = Arc::new(Semaphore::new(MAX_PARALLEL_FRAME_PROCESSING));
         
         // Create a seperate task for handling frames - performing inference
         let process_queue_parallel_limit = Arc::clone(&queue_parallel_limit);

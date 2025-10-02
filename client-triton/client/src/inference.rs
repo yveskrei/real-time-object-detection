@@ -25,8 +25,9 @@ use crate::utils::{
     config::{AppConfig, ModelConfig, TritonConfig}
 };
 
-/// Static singleton instance for model inference
+// Variables
 pub static INFERENCE_MODEL: OnceCell<Arc<InferenceModel>> = OnceCell::const_new();
+pub static GPU_STATS_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Returns the inference model instance, if initiated
 pub fn get_inference_model() -> Result<&'static Arc<InferenceModel>> {
@@ -58,8 +59,18 @@ pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-pub async fn start_model_instances(instances: usize) -> Result<()> {
+pub async fn start_model_instances(app_config: &AppConfig) -> Result<()> {
     let client_instance = get_inference_model()?;
+
+    // Calculate amount of model instances we want
+    // Based on how many frames we want to process for each source
+    let instances: usize = app_config
+        .sources_config()
+        .sources
+        .values()
+        .map(|source_config| 1.0 / source_config.inf_frame as f32)
+        .sum::<f32>()
+        .ceil() as usize;
 
     // Clear previous model instances
     if let Ok(_) = client_instance.unload_model().await {
@@ -70,8 +81,9 @@ pub async fn start_model_instances(instances: usize) -> Result<()> {
     client_instance.load_model(instances).await
         .context("Error loading model instances")?;
 
-    Ok(())
+    tracing::info!("Initiated {} model instances", instances);
 
+    Ok(())
 }
 
 /// Represents raw frame before performing inference on it
@@ -192,7 +204,7 @@ impl InferenceModel {
 
 
         // Spawn seperate task to monitor GPU stats
-        let stats_interval = Duration::from_secs(5);
+        let stats_interval = GPU_STATS_INTERVAL.clone();
         let stats_handle = tokio::spawn(async move {
             let mut interval = interval(stats_interval);
             
