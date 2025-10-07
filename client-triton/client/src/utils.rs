@@ -4,6 +4,7 @@ use nvml_wrapper::Nvml;
 
 // Custom modules
 pub mod config;
+pub mod kafka;
 
 /// Represents GPU statistics that are reported by the application
 pub struct GPUStats {

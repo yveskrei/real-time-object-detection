@@ -14,7 +14,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use anyhow::{self, Result, Context};
-use tokio::time::{Duration, interval, Instant};
+use tokio::time::{Duration, interval};
 
 // Custom modules
 pub mod source;
@@ -62,15 +62,30 @@ pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
 pub async fn start_model_instances(app_config: &AppConfig) -> Result<()> {
     let client_instance = get_inference_model()?;
 
-    // Calculate amount of model instances we want
-    // Based on how many frames we want to process for each source
-    let instances: usize = app_config
+    // Calculate total "load units" - how much processing capacity we need
+    // Each source contributes fractional load based on its frame rate
+    let total_load: f32 = app_config
         .sources_config()
         .sources
         .values()
         .map(|source_config| 1.0 / source_config.inf_frame as f32)
-        .sum::<f32>()
-        .ceil() as usize;
+        .sum();
+    
+    // Get target batch size from config
+    let target_batch_size = app_config.model_config()
+        .perf_batch_sizes
+        .iter()
+        .max()
+        .copied()
+        .unwrap_or(app_config.model_config().max_batch_size) as f32;
+    
+    // Calculate instances needed
+    // Divide total load by target batch size to get base instances
+    // Add small overhead for arrival variance
+    let batch_efficiency = 0.60; // Assume X% batch fill rate in practice
+    let instances = (total_load / (target_batch_size * batch_efficiency))
+        .ceil()
+        .max(1.0) as usize;
 
     // Clear previous model instances
     if let Ok(_) = client_instance.unload_model().await {
@@ -84,15 +99,6 @@ pub async fn start_model_instances(app_config: &AppConfig) -> Result<()> {
     tracing::info!("Initiated {} model instances", instances);
 
     Ok(())
-}
-
-/// Represents raw frame before performing inference on it
-#[derive(Clone)]
-pub struct InferenceFrame {
-    pub data: Vec<u8>,
-    pub height: usize,
-    pub width: usize,
-    pub added: Instant
 }
 
 /// Represents the inference model precision type
@@ -266,19 +272,19 @@ impl InferenceModel {
         let model_config = json!({
             "name": &self.triton_config().model_name.to_string(),
             "platform": "tensorrt_plan",
-            "max_batch_size": &self.model_config.max_batch_size,
+            "max_batch_size": &self.model_config().max_batch_size,
             "input": [
                 {
-                    "name": &self.model_config.input_name,
-                    "data_type": format!("TYPE_{}", &self.model_config.precision.to_string()),
-                    "dims": &self.model_config.input_shape
+                    "name": &self.model_config().input_name,
+                    "data_type": format!("TYPE_{}", &self.model_config().precision.to_string()),
+                    "dims": &self.model_config().input_shape
                 }
             ],
             "output": [
                 {
-                    "name": &self.model_config.output_name,
-                    "data_type": format!("TYPE_{}", &self.model_config.precision.to_string()),
-                    "dims": &self.model_config.output_shape
+                    "name": &self.model_config().output_name,
+                    "data_type": format!("TYPE_{}", &self.model_config().precision.to_string()),
+                    "dims": &self.model_config().output_shape
                 }
             ],
             "instance_group": [
@@ -289,8 +295,8 @@ impl InferenceModel {
                 }
             ],
             "dynamic_batching": {
-                "max_queue_delay_microseconds": 1500,
-                "preferred_batch_size": &self.model_config.perf_batch_sizes
+                "max_queue_delay_microseconds": self.model_config().max_queue_delay,
+                "preferred_batch_size": &self.model_config().perf_batch_sizes
             },
             "optimization": {
                 "execution_accelerators": {
@@ -299,7 +305,7 @@ impl InferenceModel {
                         "name": "tensorrt",
                         "parameters": {
                             "key": "precision_mode",
-                            "value": &self.model_config.precision.to_string()
+                            "value": &self.model_config().precision.to_string()
                         }
                     }
                 ]
@@ -318,11 +324,11 @@ impl InferenceModel {
             "model_warmup": [
                 {
                     "name": "warmup_random",
-                    "batch_size": 10,
+                    "batch_size": self.model_config().max_batch_size,
                     "inputs":  {
-                        &self.model_config.input_name: {
-                            "dims": &self.model_config.input_shape,
-                            "data_type": format!("TYPE_{}", &self.model_config.precision.to_string()),
+                        &self.model_config().input_name: {
+                            "dims": &self.model_config().input_shape,
+                            "data_type": format!("TYPE_{}", &self.model_config().precision.to_string()),
                             "random_data": true
                         }
                     }

@@ -2,6 +2,8 @@
 
 use anyhow::{Result, Context};
 use std::time::Instant;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 
 // Custom modules
 use crate::inference::{
@@ -10,10 +12,7 @@ use crate::inference::{
     InferencePrecision
 };
 use crate::processing::{self, RawFrame, ResultEmbedding};
-
-// SIMD intrinsics for x86-64 architecture
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+use crate::inference::source::SourceProcessor;
 
 /// ImageNet normalization constants
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
@@ -454,7 +453,7 @@ pub async fn process_frame(
 
     // Populate results
     let measure_start = Instant::now();
-    //SourceProcessor::populate_embedding(source_id, embedding);
+    SourceProcessor::populate_embedding(source_id, embedding).await;
     let results_time = measure_start.elapsed();
 
     // Create statistics object
