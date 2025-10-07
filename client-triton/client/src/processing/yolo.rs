@@ -3,7 +3,6 @@ use std::time::Instant;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-use crate::inference::source::SourceProcessor;
 // Custom modules
 use crate::inference::{
     source::FrameProcessStats, 
@@ -12,6 +11,7 @@ use crate::inference::{
 };
 use crate::processing::{self, RawFrame, ResultBBOX};
 use crate::utils::config::SourceConfig;
+use crate::inference::source::SourceProcessor;
 
 #[derive(Copy, Clone)]
 struct LetterboxParams {
@@ -673,9 +673,11 @@ pub async fn process_frame(
         .context("Error postprocessing BBOXes for YOLO")?;
     let post_proc_time = measure_start.elapsed();
 
-    // Populate results
+    // Populate results - Only if got bboxes as result from model
     let measure_start = Instant::now();
-    //SourceProcessor::populate_bboxes(source_id, bboxes);
+    if bboxes.len() > 0 {
+        SourceProcessor::populate_bboxes(source_id, bboxes).await;
+    }
     let results_time = measure_start.elapsed();
 
     // Create statistics object

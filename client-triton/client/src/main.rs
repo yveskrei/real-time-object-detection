@@ -3,17 +3,25 @@ use anyhow::{Result, Context};
 use std::env;
 
 // Custom modules
-use client::utils::config::AppConfig;
 use client::inference::{self, source};
-use client::utils;
+use client::utils::{
+    self,
+    kafka,
+    config::AppConfig
+};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    //Iniaitlize config
+    // Iniaitlize config
     let mut app_config = AppConfig::new()
         .context("Error loading config")?;
 
-    //Initiate inference client
+    // Initiate Kafka producer
+    kafka::init_kafka_producer(&app_config)
+        .await
+        .context("Error initiating Kafka producer")?;
+
+    // Initiate inference client
     inference::init_inference_model(&app_config)
         .await
         .context("Error initiating inference model")?;
@@ -25,13 +33,13 @@ async fn main() -> Result<()> {
         .context("Error loading test image")?;
     
     // Test variables
-    let min_streams = 0;
-    let max_streams = 50; // Adjust this to your desired maximum
-    let test_duration = Duration::from_secs(30); // 60 second test
+    let min_streams = 5;
+    let max_streams = 150; // Adjust this to your desired maximum
+    let test_duration = Duration::from_secs(60); // 60 second test
     let frame_interval = Duration::from_millis(34); // 30fps = ~33.33ms, using 34ms
-    let stagger_delay = Duration::from_micros(750);   // 2ms delay between processors
+    let stagger_delay = Duration::from_micros(100);   // 2ms delay between processors
 
-    for stream_count in min_streams..=max_streams {
+    for stream_count in (min_streams..=max_streams).step_by(5) {
         tracing::info!("\n=== Starting performance test with {} streams ===", stream_count);
         
         // Create source IDs for current test

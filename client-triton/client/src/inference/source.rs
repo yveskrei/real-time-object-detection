@@ -8,6 +8,7 @@ use anyhow::{Result, Context};
 use tokio::time::{Duration, interval, Instant};
 use tokio::sync::{RwLock, Semaphore};
 use std::sync::LazyLock;
+use serde_json::json;
 
 // Custom modules
 use crate::inference::{
@@ -17,12 +18,13 @@ use crate::inference::{
 };
 use crate::processing::{self, RawFrame, ResultBBOX, ResultEmbedding};
 use crate::utils::config::{AppConfig, SourceConfig};
+use crate::utils::kafka;
 
 // Variables
 pub static PROCESSORS: LazyLock<RwLock<HashMap<String, Arc<SourceProcessor>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 pub static MAX_QUEUE_FRAMES: usize = 5;
 pub static MAX_PARALLEL_FRAME_PROCESSING: usize = 5;
-pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(3);
+pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Returns a source processor instance by given stream ID
 pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
@@ -254,9 +256,10 @@ impl SourceProcessor {
         let stats_source_id = source_id.clone();
         let stats_source_config = source_config.clone();
         let stats_source_stats = Arc::clone(&source_stats);
+        let stats_interval = SOURCE_STATS_INTERVAL.clone();
 
         let stats_handle = tokio::spawn(async move {
-            let mut interval = interval(SOURCE_STATS_INTERVAL.clone());
+            let mut interval = interval(stats_interval);
             
             loop {
                 interval.tick().await;
@@ -405,21 +408,45 @@ impl SourceProcessor {
     }
 
     /// Populates BBOXes to third party services
-    pub fn populate_bboxes(source_id: &str, bboxes: Vec<ResultBBOX>) {
-        tracing::info!(
-            source_id=source_id,
-            total_bboxes=bboxes.len(),
-            "Got bboxes to populate!"
-        )
+    pub async fn populate_bboxes(source_id: &str, bboxes: Vec<ResultBBOX>) {
+        // Populate to Kafka
+        if let Ok(kafka_producer) = kafka::get_kafka_producer() {
+            if let Ok(data) = serde_json::to_string(&bboxes) {
+                let message = json!({
+                    "type": "BBOX",
+                    "data": data
+                }).to_string();
+                
+                if let Err(e) = kafka_producer.produce(Some(source_id), &message).await {
+                    tracing::warn!(
+                        source_id = source_id,
+                        error = %e,
+                        "Failed to populate bboxes to Kafka"
+                    );
+                }
+            }
+        };
     }
 
     /// Populates embedding to third party services
-    pub fn populate_embedding(source_id: &str, embedding: ResultEmbedding) {
-        tracing::info!(
-            source_id=source_id,
-            embedding_size=embedding.data.len(),
-            "Got embedding to populate!"
-        )
+    pub async fn populate_embedding(source_id: &str, embedding: ResultEmbedding) {
+        // Populate to Kafka
+        if let Ok(kafka_producer) = kafka::get_kafka_producer() {
+            if let Ok(data) = serde_json::to_string(&embedding) {
+                let message = json!({
+                    "type": "Embedding",
+                    "data": data
+                }).to_string();
+                
+                if let Err(e) = kafka_producer.produce(Some(source_id), &message).await {
+                    tracing::warn!(
+                        source_id = source_id,
+                        error = %e,
+                        "Failed to populate embedding to Kafka"
+                    );
+                }
+            }
+        };
     }
 }
 

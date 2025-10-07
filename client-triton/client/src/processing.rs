@@ -3,6 +3,7 @@
 
 use std::sync::OnceLock;
 use tokio::time::Instant;
+use serde::Serialize;
 
 // Custom modules
 pub mod yolo;
@@ -18,7 +19,7 @@ pub struct RawFrame {
 }
 
 /// Represents a single bbox instance from the model inference results
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
 pub struct ResultBBOX {
     pub bbox: [f32; 4],
     pub class: usize, 
@@ -40,7 +41,7 @@ impl ResultBBOX {
 }
 
 /// Represents embedding output from the model inference results
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct ResultEmbedding {
     pub data: Vec<f32>
 }

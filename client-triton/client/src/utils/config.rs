@@ -44,6 +44,7 @@ pub struct ModelConfig {
     pub output_name: String,
     pub output_shape: Vec<i64>,
     pub max_batch_size: usize,
+    pub max_queue_delay: usize,
     pub perf_batch_sizes: Vec<usize>,
     pub precision: InferencePrecision
 }
@@ -71,12 +72,20 @@ pub struct TritonConfig {
     pub model_version: String
 }
 
+#[derive(Debug, Clone)]
+pub struct KafkaConfig {
+    pub brokers: String,
+    pub topic: String
+}
+
+
 /// Represents all the configuation variables used by the application
 pub struct AppConfig {
     local: bool,
     environment: Environment,
     gpu_name: String,
     sources_config: SourcesConfig,
+    kafka_config: KafkaConfig,
     triton_config: TritonConfig,
     model_config: ModelConfig,
 }
@@ -140,7 +149,6 @@ impl AppConfig {
             .unwrap_or("".to_string())
         );
 
-        // Check if source has a prefrred setting and assign default value if not
         let mut sources: HashMap<String, SourceConfig> = HashMap::new();
         for source in source_ids.iter() {
             let conf_threshold: f32 = source_confs
@@ -169,6 +177,14 @@ impl AppConfig {
             );
         }
         sources_config.sources = sources;
+
+        // Kafka
+        let kafka_config = KafkaConfig {
+            brokers: env::var("KAFKA_BROKERS")
+                .context("KAFKA_BROKERS variable not found")?,
+            topic: env::var("KAFKA_TOPIC")
+                .context("KAFKA_TOPIC variable not found")?,
+        };
 
         // Triton
         let triton_config = TritonConfig {
@@ -204,6 +220,10 @@ impl AppConfig {
                 .context("MODEL_MAX_BATCH_SIZE variable not found")?
                 .parse()
                 .context("MODEL_MAX_BATCH_SIZE must be a positive number")?,
+            max_queue_delay: env::var("MODEL_MAX_QUEUE_DELAY")
+                .context("MODEL_MAX_QUEUE_DELAY variable not found")?
+                .parse()
+                .context("MODEL_MAX_QUEUE_DELAY must be a positive number")?,
             perf_batch_sizes: AppConfig::parse_list(
                     &env::var("MODEL_PERF_BATCH_SIZES")
                     .context("MODEL_PERF_BATCH_SIZES variable not found")?
@@ -219,6 +239,7 @@ impl AppConfig {
             environment: app_env,
             gpu_name,
             sources_config,
+            kafka_config,
             triton_config,
             model_config,
         })
@@ -340,6 +361,10 @@ impl AppConfig {
 
     pub fn sources_config(&self) -> &SourcesConfig {
         &self.sources_config
+    }
+
+    pub fn kafka_config(&self) -> &KafkaConfig {
+        &self.kafka_config
     }
 
     pub fn triton_config(&self) -> &TritonConfig {
