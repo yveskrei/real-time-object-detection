@@ -15,6 +15,7 @@ pub struct RawFrame {
     pub data: Vec<u8>,
     pub height: usize,
     pub width: usize,
+    pub pts: u64,
     pub added: Instant
 }
 

@@ -1,0 +1,262 @@
+use anyhow::{Result, Context};
+use libloading::{Library, Symbol};
+use libc::{c_int, c_ulonglong, c_char, c_void};
+use std::slice;
+use once_cell::sync::OnceCell;
+use std::sync::Arc;
+
+// Custom modules
+use crate::inference::source;
+use crate::utils::config::AppConfig;
+
+/// Client as static global variable
+pub static CLIENT_VIDEO: OnceCell<Arc<ClientVideo>> = OnceCell::new();
+
+pub fn get_client_video() -> Result<&'static Arc<ClientVideo>> {
+    CLIENT_VIDEO
+        .get()
+        .context("Error getting client video")
+}
+
+pub fn init_client_video(app_config: &AppConfig) -> Result<()> {
+    // Create new instance
+    let client_video = ClientVideo::new()
+        .context("Error creating client video")?;
+
+    // Set client callbacks
+    client_video.set_callbacks()
+        .context("Error setting client callbacks")?;
+
+    // Start sources
+    let source_ids: Vec<String> = app_config.sources_config().sources
+        .keys()
+        .cloned()
+        .collect();
+
+    client_video.init_sources(source_ids)
+        .context("Could not start video sources")?;
+
+    // Set global variable
+    CLIENT_VIDEO.set(Arc::new(client_video))
+        .map_err(|_| anyhow::anyhow!("Error setting client video"))?;
+
+    Ok(())
+}
+
+// C Types
+pub type SourceFramesCb = extern "C" fn(source_id: c_int, frame: *const u8, width: c_int, height: c_int, pts: c_ulonglong);
+pub type SourceStoppedCb = extern "C" fn(source_id: c_int);
+pub type SourceNameCb = extern "C" fn(source_id: c_int, source_name: *const c_char);
+pub type SourceStatusCb = extern "C" fn(source_id: c_int, source_status: c_int);
+pub type InitMultipleSourcesFn = extern "C" fn(source_ids: *const c_int, size: c_int, log_level: c_int);
+pub type PostResultsFn = extern "C" fn(source_id: c_int, result_json: *const c_char) -> c_int;
+pub type FreeCPtrFn = extern "C" fn(ptr: *const c_void);
+pub type SetCallbacksFn = extern "C" fn(
+    source_frames: SourceFramesCb,
+    source_stopped: SourceStoppedCb,
+    source_name: SourceNameCb,
+    source_status: SourceStatusCb
+);
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LogLevel {
+    Regular = 0,
+    Debug = 1,
+}
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy)]
+pub enum SourceStatus {
+    Ok = 0,
+    NotStreaming = 1,
+    NotFound = 2,
+    ConnectionError = 3,
+    DecodeError = 4,
+}
+
+pub struct ClientVideo {
+    library: Library
+}
+
+impl ClientVideo {
+    pub fn new() -> Result<Self> {
+        // Load dynamic library
+        let library = unsafe {
+            Library::new("secrets/libclient_video.so")?
+        };
+
+        Ok(
+            Self {
+                library
+            }
+        )
+    }
+
+    // Library function
+    fn set_callbacks(&self) -> Result<()> {
+        unsafe {
+            let lib_set_callbacks: Symbol<SetCallbacksFn> = self.library().get(b"SetCallbacks")
+                .context("Cannot get 'SetCallbacks' function")?;
+
+
+            lib_set_callbacks(
+                ClientVideo::_source_frames_callback,
+                ClientVideo::_source_stopped_callback,
+                ClientVideo::_source_name_callback,
+                ClientVideo::_source_status_callback
+            )
+        }
+
+        Ok(())
+    }
+
+    pub fn init_sources(&self, source_ids: Vec<String>) -> Result<()> {
+
+        unsafe {
+            let lib_init_multiple_sources: Symbol<InitMultipleSourcesFn> = self.library().get(b"InitMultipleSources")
+                .context("Cannot get 'InitMultipleSources' function")?;
+
+
+            lib_init_multiple_sources(
+                source_ids.as_ptr() as *const c_int, 
+                source_ids.len() as c_int, 
+                LogLevel::Regular as c_int
+            )
+        }
+
+        Ok(())
+    }
+    pub fn populate_bboxes() {
+
+    }
+
+    // Callbacks
+    extern "C" fn _source_frames_callback(
+        source_id: c_int,
+        frame: *const u8,
+        width: c_int,
+        height: c_int,
+        pts: c_ulonglong,
+    ) {
+        let source_id = source_id.to_string();
+        let width = width as usize;
+        let height = height as usize;
+
+        match source::get_source_processor(&source_id) {
+            Err(e) => {
+                tracing::error!(
+                    error=e.to_string(),
+                    source_id=source_id, 
+                    "Source processor is not available"
+                )
+            },
+            Ok(processor) => {
+                match ClientVideo::get_c_array(frame, (width * height * 3) as usize) {
+                    Err(e) => {
+                        tracing::error!(
+                            error=e.to_string(),
+                            source_id=source_id, 
+                            "RGB Frame is invalid"
+                        )
+                    },
+                    Ok(rgb_frame) => {
+                        processor.process_frame(rgb_frame, height, width, pts);
+                    }
+                }
+            }
+        }
+    }
+    extern "C" fn _source_stopped_callback(source_id: c_int) {
+        tracing::info!(
+            source_id=source_id, 
+            "Source stopped!"
+        );
+    }
+
+    extern "C" fn _source_name_callback(source_id: c_int, source_name: *const c_char) {
+        let source_name = ClientVideo::get_c_string(source_name)
+            .unwrap_or("UNKNOWN".to_string());
+
+        tracing::info!(
+            source_id=source_id, 
+            source_name=source_name, 
+            "Got source name"
+        );
+    }
+
+    extern "C" fn _source_status_callback(source_id: c_int, source_status: c_int) {
+        let source_status = match source_status {
+            0 => "OK - Stream is active",
+            1 => "ERROR - Not streaming",
+            2 => "ERROR - Source not found",
+            3 => "ERROR - Connection error",
+            4 => "ERROR - Decode error",
+            _ => "UNKNOWN status",
+        };
+
+        tracing::info!(
+            source_id=source_id, 
+            source_status=source_status, 
+            "Got source status"
+        );
+    }
+
+    // Helper functions
+    fn free_c_ptr<T>(ptr: *const T) -> Result<()> {
+        let library = get_client_video()?
+            .library();
+
+        unsafe {
+            let lib_free_c_ptr: Symbol<FreeCPtrFn> = library.get(b"FreeCPtr")
+                .context("Cannot get 'FreeCPtr' function")?;
+
+            // Call library function
+            lib_free_c_ptr(ptr as *const c_void);
+        }
+
+        Ok(())
+    }
+
+    fn get_c_string(ptr: *const c_char) -> Result<String> {
+        if ptr.is_null() {
+            anyhow::bail!("C string is invalid!")
+        }
+
+        let string = unsafe {
+            std::ffi::CStr::from_ptr(ptr)
+                .to_string_lossy()
+                .into_owned()
+        };
+
+        // Try freeing the pointer
+        if let Err(e) = ClientVideo::free_c_ptr(ptr) {
+            tracing::info!(
+                error=e.to_string(),
+                "Error freeing c string pointer"
+            )
+        }
+
+        Ok(string)
+    }
+
+    fn get_c_array<T: Clone>(ptr: *const T, len: usize) -> Result<Vec<T>> {
+        if ptr.is_null() {
+            anyhow::bail!("C list is invalid!")
+        }
+        
+        // Create a slice from the raw pointer
+        let slice = unsafe {
+            slice::from_raw_parts(ptr, len)
+        };
+        
+        // Clone into a Vec (copies the data)
+        Ok(slice.to_vec())
+    }
+}
+
+impl ClientVideo {
+    fn library(&self) -> &Library {
+        return &self.library
+    }
+}

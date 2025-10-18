@@ -8,7 +8,7 @@ pub struct FixedSizeQueue<T> {
     queue: Arc<Mutex<VecDeque<T>>>,
     notify: Arc<Notify>,
     capacity: usize,
-    on_drop: Option<Arc<dyn Fn(&T) + Send + Sync>>,
+    on_drop: Option<Arc<dyn Fn(T) + Send + Sync>>,
     pub sender: FixedSizeQueueSender<T>,
     pub receiver: FixedSizeQueueReceiver<T>
 }
@@ -16,11 +16,11 @@ pub struct FixedSizeQueue<T> {
 impl<T> FixedSizeQueue<T> {
     pub fn new<F>(capacity: usize, on_drop: Option<F>) -> Self 
     where
-        F: Fn(&T) + Send + Sync + 'static
+        F: Fn(T) + Send + Sync + 'static
     {
         let queue = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
         let notify = Arc::new(Notify::new());
-        let on_drop_arc = on_drop.map(|f| Arc::new(f) as Arc<dyn Fn(&T) + Send + Sync>);
+        let on_drop_arc = on_drop.map(|f| Arc::new(f) as Arc<dyn Fn(T) + Send + Sync>);
         
         let sender = FixedSizeQueueSender {
             queue: Arc::clone(&queue),
@@ -49,7 +49,7 @@ pub struct FixedSizeQueueSender<T> {
     queue: Arc<Mutex<VecDeque<T>>>,
     notify: Arc<Notify>,
     capacity: usize,
-    on_drop: Option<Arc<dyn Fn(&T) + Send + Sync>>,
+    on_drop: Option<Arc<dyn Fn(T) + Send + Sync>>,
 }
 
 impl<T> FixedSizeQueueSender<T> {
@@ -61,7 +61,7 @@ impl<T> FixedSizeQueueSender<T> {
                 if queue.len() >= self.capacity {
                     if let Some(dropped_item) = queue.pop_front() {
                         if let Some(ref callback) = self.on_drop {
-                            callback(&dropped_item);
+                            callback(dropped_item);
                         }
                     }
                 }
@@ -82,7 +82,7 @@ impl<T> FixedSizeQueueSender<T> {
         if queue.len() >= self.capacity {
             if let Some(dropped_item) = queue.pop_front() {
                 if let Some(ref callback) = self.on_drop {
-                    callback(&dropped_item);
+                    callback(dropped_item);
                 }
             }
         }

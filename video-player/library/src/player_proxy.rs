@@ -1,14 +1,7 @@
-use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
-use tokio::runtime::Runtime;
 use anyhow::{Context, Result};
-
-// Global static Tokio runtime for the dynamic library
-pub static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    Runtime::new().expect("Failed to create Tokio runtime")
-});
 
 // Response models matching the backend
 #[derive(Debug, Deserialize, Serialize)]

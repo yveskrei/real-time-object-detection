@@ -1,11 +1,2 @@
-## Run Backend
-```
-cd backend
-uvicorn main:app --reload --port 8702
-```
-
-## Run Frontend
-```
-cd frontend
-python main.py
-```
+## Run local video player
+The local video player allows you to 

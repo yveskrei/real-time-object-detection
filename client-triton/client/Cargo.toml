@@ -17,3 +17,5 @@ anyhow = "1.0.98"
 nvml-wrapper = "0.11.0"
 tracing-appender = "0.2.3"
 rdkafka = { version = "0.38.0", features = ["cmake-build"] }
+libloading = "0.8.9"
+libc = "0.2.177"

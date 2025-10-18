@@ -18,11 +18,12 @@ class ReplaySaveThread(QThread):
     progress = pyqtSignal(int, int)  # current, total
     finished = pyqtSignal(bool, str)  # success, message
     
-    def __init__(self, replay_buffer, file_path, resolution):
+    def __init__(self, replay_buffer, file_path, resolution, fps):
         super().__init__()
         self.replay_buffer = list(replay_buffer)  # Copy buffer
         self.file_path = file_path
         self.resolution = resolution
+        self.fps = fps
     
     def run(self):
         try:
@@ -32,7 +33,7 @@ class ReplaySaveThread(QThread):
             
             # Create output video with PyAV
             output = av.open(self.file_path, mode='w')
-            stream = output.add_stream('h264', rate=30)
+            stream = output.add_stream('h264', rate=self.fps)
             stream.width = width
             stream.height = height
             stream.pix_fmt = 'yuv420p'
@@ -75,6 +76,7 @@ class ReplaySaveThread(QThread):
 class VideoStreamThread(QThread):
     """Thread for reading video stream frames with real global PTS from FFmpeg"""
     frame_ready = pyqtSignal(object, int, int, float)  # numpy_frame, frame_number, pts_raw, time_base
+    stream_info = pyqtSignal(float)  # fps from stream metadata
     error = pyqtSignal(str)
     
     def __init__(self, stream_url: str):
@@ -92,22 +94,65 @@ class VideoStreamThread(QThread):
             try:
                 print(f"[VideoStreamThread] Connecting to {self.stream_url}...")
                 
-                # For UDP streams, we need to format the URL correctly
-                # Change udp://127.0.0.1:port to udp://@127.0.0.1:port (listen mode)
+                # Prepare stream URL and options based on protocol
                 stream_url = self.stream_url
-                if stream_url.startswith('udp://') and '@' not in stream_url:
-                    # Add @ to indicate listen mode
-                    stream_url = stream_url.replace('udp://', 'udp://@')
-                    print(f"[VideoStreamThread] Adjusted URL to listen mode: {stream_url}")
+                options = {}
+                
+                if stream_url.startswith('udp://'):
+                    # For UDP streams as a CLIENT (consuming video):
+                    # Only add @ if explicitly needed for multicast/broadcast listening
+                    # Otherwise, let FFmpeg handle it automatically
+                    
+                    # Check if this is a multicast address (224.0.0.0 - 239.255.255.255)
+                    # or if @ is already present
+                    if '@' not in stream_url:
+                        # Parse to check if multicast
+                        import re
+                        match = re.search(r'udp://(\d+\.\d+\.\d+\.\d+):(\d+)', stream_url)
+                        if match:
+                            ip = match.group(1)
+                            octets = [int(x) for x in ip.split('.')]
+                            is_multicast = (224 <= octets[0] <= 239)
+                            
+                            # Only add @ for multicast addresses or localhost
+                            if is_multicast or ip == '127.0.0.1' or ip == '0.0.0.0':
+                                stream_url = stream_url.replace('udp://', 'udp://@')
+                                print(f"[VideoStreamThread] Using listen mode for local/multicast: {stream_url}")
+                    
+                    # UDP-specific options for better streaming
+                    options = {
+                        'rtbufsize': '100M',
+                        'fifo_size': '1000000',
+                        'overrun_nonfatal': '1',
+                        'buffer_size': '65536',
+                    }
+                
+                elif stream_url.startswith('rtsp://'):
+                    # RTSP options
+                    options = {
+                        'rtsp_transport': 'tcp',  # Use TCP for reliability
+                        'rtsp_flags': 'prefer_tcp',
+                        'max_delay': '500000',
+                    }
+                
+                elif stream_url.startswith('http://') or stream_url.startswith('https://'):
+                    # HTTP/HTTPS options
+                    options = {
+                        'timeout': '10000000',  # 10 seconds
+                        'reconnect': '1',
+                        'reconnect_streamed': '1',
+                        'reconnect_delay_max': '5',
+                    }
+                
+                # Common options for all protocols
+                options.update({
+                    'fflags': 'nobuffer',
+                    'flags': 'low_delay',
+                    'max_delay': '500000',
+                })
                 
                 # Open container with PyAV
-                container = av.open(stream_url, options={
-                    'rtbufsize': '100M',  # Increase buffer for UDP
-                    'fflags': 'nobuffer',  # Minimize buffering delay
-                    'max_delay': '500000',  # 0.5 seconds
-                    'reorder_queue_size': '0',  # Disable reordering for lower latency
-                    'reuse': '1',  # Allow reusing the socket (SO_REUSEADDR)
-                }, timeout=10.0)
+                container = av.open(stream_url, options=options, timeout=10.0)
                 
                 print(f"[VideoStreamThread] Connected! Container: {container}")
                 
@@ -125,6 +170,28 @@ class VideoStreamThread(QThread):
                 print(f"[VideoStreamThread] Codec: {video_stream.codec_context.name}")
                 print(f"[VideoStreamThread] Size: {video_stream.codec_context.width}x{video_stream.codec_context.height}")
                 print(f"[VideoStreamThread] Time base: {video_stream.time_base}")
+                
+                # Get FPS from stream metadata
+                stream_fps = None
+                if video_stream.average_rate:
+                    stream_fps = float(video_stream.average_rate)
+                    print(f"[VideoStreamThread] Average FPS: {stream_fps}")
+                elif video_stream.guessed_rate:
+                    stream_fps = float(video_stream.guessed_rate)
+                    print(f"[VideoStreamThread] Guessed FPS: {stream_fps}")
+                
+                # Fallback to frame rate from codec context
+                if not stream_fps and video_stream.codec_context.framerate:
+                    stream_fps = float(video_stream.codec_context.framerate)
+                    print(f"[VideoStreamThread] Codec FPS: {stream_fps}")
+                
+                # Default to 30 if we can't determine FPS
+                if not stream_fps or stream_fps <= 0:
+                    stream_fps = 30.0
+                    print(f"[VideoStreamThread] Warning: Could not determine FPS, defaulting to {stream_fps}")
+                
+                # Emit stream info with FPS
+                self.stream_info.emit(stream_fps)
                 
                 # Get time base for PTS conversion
                 time_base = float(video_stream.time_base)
@@ -222,16 +289,22 @@ class VideoPlayerWidget(QWidget):
     
     closed = pyqtSignal(int)  # Signal emitted when player is closed
     
-    def __init__(self, video_id: int, stream_url: str, stream_start_time_ms: int, api_client, parent=None):
+    def __init__(self, video_id: int, stream_url: str, stream_start_time_ms: int, api_client, 
+                 replay_duration_seconds: float = 30.0, buffer_delay_ms: int = 500, 
+                 bbox_cache_retention_seconds: float = 3.0, parent=None):
         super().__init__(parent)
         self.video_id = video_id
         self.stream_url = stream_url
         self.stream_start_time_ms = stream_start_time_ms  # For reference only
         self.api_client = api_client
         
-        # Buffer settings
-        self.buffer_delay_ms = 500  # 500ms delay to allow bbox generation
-        self.frame_buffer = deque(maxlen=60)  # Buffer up to 2 seconds at 30fps
+        # Configurable settings
+        self.replay_duration_seconds = replay_duration_seconds
+        self.buffer_delay_ms = buffer_delay_ms
+        self.bbox_cache_retention_seconds = bbox_cache_retention_seconds
+        
+        # Frame buffer for delayed display
+        self.frame_buffer = deque(maxlen=200)  # Keep reasonable buffer size for delay
         
         # BBox cache: {raw_pts: [bboxes]}
         self.bbox_cache = {}
@@ -242,21 +315,43 @@ class VideoPlayerWidget(QWidget):
         # Current state
         self.current_pts_raw = 0  # Raw PTS value
         self.time_base = 1/90000.0  # Will be updated from stream
-        self.current_fps = 0.0
+        
+        # FPS - will be locked from stream metadata
+        self.stream_fps = 30.0  # Will be set from stream
+        self.fps_locked = False  # Whether FPS has been locked from stream
+        self.current_display_fps = 0.0  # For display purposes
         self.fps_frame_count = 0
         self.fps_last_update = time.time()
+        self.display_timer = None  # Will be created after FPS is locked
         
         # Frame dimensions
         self.frame_width = 0
         self.frame_height = 0
         
-        # Instant replay buffer (30 seconds @ 30fps = 900 frames)
-        self.replay_buffer = deque(maxlen=900)
+        # Dynamic replay buffer based on FPS
+        self.replay_buffer = deque(maxlen=self._calculate_replay_buffer_size())
         self.replay_resolution = None  # Will be set on first frame
         self.save_thread = None  # Background save thread
         
         self.setup_ui()
         self.start_stream()
+    
+    def _calculate_replay_buffer_size(self) -> int:
+        """Calculate replay buffer size based on stream FPS and desired duration"""
+        return max(int(self.stream_fps * self.replay_duration_seconds), 30)
+    
+    def _update_replay_buffer_size(self):
+        """Update replay buffer size based on locked stream FPS"""
+        if not self.fps_locked:
+            return  # Don't resize until FPS is locked
+            
+        new_size = self._calculate_replay_buffer_size()
+        if new_size != self.replay_buffer.maxlen:
+            # Create new buffer with new size, preserving most recent frames
+            old_buffer = list(self.replay_buffer)
+            self.replay_buffer = deque(old_buffer[-new_size:] if len(old_buffer) > new_size else old_buffer, 
+                                      maxlen=new_size)
+            print(f"[Replay] Buffer initialized to {new_size} frames ({self.replay_duration_seconds}s @ {self.stream_fps:.1f} FPS)")
     
     def setup_ui(self):
         """Setup the UI components"""
@@ -329,18 +424,35 @@ class VideoPlayerWidget(QWidget):
         # Start video stream thread with PyAV
         self.stream_thread = VideoStreamThread(self.stream_url)
         self.stream_thread.frame_ready.connect(self.buffer_frame)
+        self.stream_thread.stream_info.connect(self.lock_stream_fps)
         self.stream_thread.error.connect(self.handle_stream_error)
         self.stream_thread.start()
         
-        # Timer to display buffered frames (checks every 33ms)
-        self.display_timer = QTimer()
-        self.display_timer.timeout.connect(self.display_buffered_frame)
-        self.display_timer.start(33)  # ~30fps
+        # Display timer will be started once FPS is locked
         
         # Timer to batch fetch bboxes (every 800ms)
         self.fetch_timer = QTimer()
         self.fetch_timer.timeout.connect(self.fetch_bbox_batch)
         self.fetch_timer.start(self.fetch_interval_ms)
+    
+    def lock_stream_fps(self, fps: float):
+        """Lock FPS from stream metadata (called once when stream connects)"""
+        if self.fps_locked:
+            return  # Already locked, ignore
+        
+        self.stream_fps = fps
+        self.fps_locked = True
+        print(f"[VideoPlayer] FPS locked to {self.stream_fps:.2f} from stream metadata")
+        
+        # Update replay buffer size based on locked FPS
+        self._update_replay_buffer_size()
+        
+        # Start display timer with interval matching stream FPS
+        display_interval_ms = int(1000.0 / self.stream_fps)
+        self.display_timer = QTimer()
+        self.display_timer.timeout.connect(self.display_buffered_frame)
+        self.display_timer.start(display_interval_ms)
+        print(f"[VideoPlayer] Display timer started at {display_interval_ms}ms interval ({self.stream_fps:.2f} fps)")
     
     def buffer_frame(self, frame, frame_number, pts_raw, time_base):
         """Add incoming frame to buffer with raw PTS"""
@@ -399,13 +511,23 @@ class VideoPlayerWidget(QWidget):
             
             self.last_fetch_pts = current_pts_raw
             
-            # Clean old cache entries (keep last 3 seconds in PTS units)
-            cutoff_pts = current_pts_raw - int((3000 / 1000.0) / self.time_base)
-            self.bbox_cache = {k: v for k, v in self.bbox_cache.items() if k > cutoff_pts}
+            # Clean old cache entries based on retention setting
+            self._clean_bbox_cache(current_pts_raw)
             
         except Exception as e:
             # Silently handle errors
             pass
+    
+    def _clean_bbox_cache(self, current_pts_raw: int):
+        """Clean old bboxes from cache based on retention policy"""
+        cutoff_pts = current_pts_raw - int((self.bbox_cache_retention_seconds * 1000.0 / 1000.0) / self.time_base)
+        old_size = len(self.bbox_cache)
+        self.bbox_cache = {k: v for k, v in self.bbox_cache.items() if k > cutoff_pts}
+        
+        # Log if significant cleanup occurred
+        removed = old_size - len(self.bbox_cache)
+        if removed > 0 and old_size % 100 == 0:  # Log every 100th cleanup
+            print(f"[BBox Cache] Cleaned {removed} old entries, kept {len(self.bbox_cache)} (retention: {self.bbox_cache_retention_seconds}s)")
     
     def display_buffered_frame(self):
         """Display frame that has been buffered long enough"""
@@ -475,13 +597,13 @@ class VideoPlayerWidget(QWidget):
         # Always capture for replay buffer
         self.capture_replay_frame()
         
-        # Calculate FPS
+        # Calculate FPS for display
         current_time = time.time()
         self.fps_frame_count += 1
         time_elapsed = current_time - self.fps_last_update
         
-        if time_elapsed >= 1.0:  # Update FPS every second
-            self.current_fps = self.fps_frame_count / time_elapsed
+        if time_elapsed >= 1.0:  # Update display FPS every second
+            self.current_display_fps = self.fps_frame_count / time_elapsed
             self.fps_frame_count = 0
             self.fps_last_update = current_time
         
@@ -496,16 +618,16 @@ class VideoPlayerWidget(QWidget):
         else:
             pts_str = f"{minutes:02d}:{seconds:05.2f}"
         
-        # Update info
-        buffer_seconds = len(self.replay_buffer) / 30.0  # Assuming 30fps
+        # Update info - show actual replay duration based on locked FPS
+        actual_replay_duration = len(self.replay_buffer) / self.stream_fps
         
-        # Update save replay button text with counter
-        self.save_replay_btn.setText(f"💾 Save Last {buffer_seconds:.1f}s")
+        # Update save replay button text with actual duration
+        self.save_replay_btn.setText(f"💾 Save Last {actual_replay_duration:.1f}s")
         
         self.info_label.setText(
             f"Video ID: {self.video_id} | "
-            f"FPS: {self.current_fps:.1f} | "
-            f"PTS: {pts_str} (raw: {self.current_pts_raw}) | "
+            f"FPS: {self.current_display_fps:.1f} | "
+            f"PTS: {pts_str} | "
             f"Delay: {actual_delay:.0f}ms | "
             f"Cache: {len(self.bbox_cache)}"
         )
@@ -566,31 +688,43 @@ class VideoPlayerWidget(QWidget):
             QMessageBox.warning(self, "No Replay Data", "Replay buffer is empty!")
             return
         
+        if not self.fps_locked:
+            QMessageBox.warning(self, "FPS Not Ready", "Stream FPS not yet detected. Please wait a moment.")
+            return
+        
         # Check if already saving
         if self.save_thread is not None and self.save_thread.isRunning():
             QMessageBox.information(self, "Save in Progress", "Already saving a replay, please wait...")
             return
         
+        # Calculate actual duration based on locked FPS
+        actual_duration = len(self.replay_buffer) / self.stream_fps
+        
         # Ask user where to save
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Replay",
-            f"replay_video{self.video_id}_{int(time.time())}.mp4",
+            f"replay_video{self.video_id}_{actual_duration:.1f}s_{int(time.time())}.mp4",
             "Video Files (*.mp4)"
         )
         
         if not file_path:
             return
         
-        # Start background save thread
-        self.save_thread = ReplaySaveThread(self.replay_buffer, file_path, self.replay_resolution)
+        # Start background save thread with locked stream FPS
+        self.save_thread = ReplaySaveThread(
+            self.replay_buffer, 
+            file_path, 
+            self.replay_resolution,
+            int(round(self.stream_fps))  # Use locked stream FPS for output
+        )
         self.save_thread.progress.connect(self.on_save_progress)
         self.save_thread.finished.connect(self.on_save_finished)
         self.save_thread.start()
         
         # Disable button while saving
         self.save_replay_btn.setEnabled(False)
-        print(f"[Replay] Started saving {len(self.replay_buffer)} frames to {file_path}...")
+        print(f"[Replay] Started saving {len(self.replay_buffer)} frames ({actual_duration:.1f}s @ {self.stream_fps:.1f} FPS) to {file_path}...")
     
     def on_save_progress(self, current, total):
         """Update button with save progress"""
@@ -599,8 +733,8 @@ class VideoPlayerWidget(QWidget):
     
     def on_save_finished(self, success, message):
         """Handle save completion"""
-        buffer_seconds = len(self.replay_buffer) / 30.0
-        self.save_replay_btn.setText(f"💾 Save Last {buffer_seconds:.1f}s")
+        actual_duration = len(self.replay_buffer) / self.stream_fps
+        self.save_replay_btn.setText(f"💾 Save Last {actual_duration:.1f}s")
         self.save_replay_btn.setEnabled(True)
         
         if success:
@@ -624,7 +758,7 @@ class VideoPlayerWidget(QWidget):
         """Cleanup resources"""
         if hasattr(self, 'stream_thread'):
             self.stream_thread.stop()
-        if hasattr(self, 'display_timer'):
+        if hasattr(self, 'display_timer') and self.display_timer:
             self.display_timer.stop()
         if hasattr(self, 'fetch_timer'):
             self.fetch_timer.stop()

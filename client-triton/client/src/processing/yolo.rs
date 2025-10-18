@@ -642,12 +642,18 @@ pub async fn process_frame(
     source_config: &SourceConfig,
     frame: &RawFrame
 ) -> Result<FrameProcessStats> {
+    let queue_time = frame.added.elapsed();
     let inference_start = Instant::now();
 
     // Pre process image
     let measure_start = Instant::now();
-    let pre_frame = preprocess(&frame, inference_model.model_config().precision)
-        .context("Error preprocessing image for YOLO")?;
+    let pre_frame = match preprocess(&frame, inference_model.model_config().precision) {
+        Ok(frame) => frame,
+        Err(e) => {
+            eprintln!("Error preprocessing image for YOLO: {:?}", e);
+            return Err(e).context("Error preprocessing image for YOLO");
+        }
+    };
     let pre_proc_time = measure_start.elapsed();
 
     // Get raw bboxes from inference
@@ -658,14 +664,10 @@ pub async fn process_frame(
 
     // Process given bboxes
     let measure_start = Instant::now();
-    let output_shape: [i64; 2] = inference_model.model_config().output_shape
-        .clone()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Output shape is invalid"))?;
     let bboxes = postprocess(
         &raw_results, 
-        &frame,
-        &output_shape,
+        frame,
+        &inference_model.model_config().output_shape,
         inference_model.model_config().precision,
         source_config.conf_threshold,
         source_config.nms_iou_threshold
@@ -676,13 +678,16 @@ pub async fn process_frame(
     // Populate results - Only if got bboxes as result from model
     let measure_start = Instant::now();
     if bboxes.len() > 0 {
-        SourceProcessor::populate_bboxes(source_id, bboxes).await;
+        SourceProcessor::populate_bboxes(
+            source_id, 
+            frame,
+            bboxes
+        ).await;
     }
     let results_time = measure_start.elapsed();
 
     // Create statistics object
-    let processing_time = frame.added.elapsed();
-    let queue_time = processing_time - inference_start.elapsed();
+    let processing_time = inference_start.elapsed() + queue_time;
     let stats = FrameProcessStats {
         queue: queue_time.as_micros() as u64,
         pre_processing: pre_proc_time.as_micros() as u64, 

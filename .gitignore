@@ -61,10 +61,11 @@ htmlcov/
 # Project-specific
 models/
 sources/
-*.cargo/
 *Cargo.lock
 *target/
 *offline-crates/
 client-triton/triton_logs/
 client-triton/triton_models/
+video-player/library/dependencies/
 *.mp4
+*.so

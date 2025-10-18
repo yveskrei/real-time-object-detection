@@ -6,9 +6,8 @@ use std::sync::atomic::{Ordering, AtomicU64};
 use std::collections::HashMap;
 use anyhow::{Result, Context};
 use tokio::time::{Duration, interval, Instant};
-use tokio::sync::{RwLock, Semaphore};
-use std::sync::LazyLock;
 use serde_json::json;
+use std::sync::{LazyLock, RwLock};
 
 // Custom modules
 use crate::inference::{
@@ -23,47 +22,40 @@ use crate::utils::kafka;
 // Variables
 pub static PROCESSORS: LazyLock<RwLock<HashMap<String, Arc<SourceProcessor>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 pub static MAX_QUEUE_FRAMES: usize = 5;
-pub static MAX_PARALLEL_FRAME_PROCESSING: usize = 5;
 pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Returns a source processor instance by given stream ID
-pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
-    Ok(
-        PROCESSORS
+pub fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
+    PROCESSORS
         .read()
-        .await
-        .get(&stream_id.to_string())
+        .unwrap()
+        .get(stream_id)
         .cloned()
-        .context("Error getting stream source processor")?
-    )
+        .context("Error getting stream source processor")
 }
 
 /// Initiates source processors for given list of sources
-pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
+pub fn init_source_processors(app_config: &AppConfig) -> Result<()> {
     let mut processors: HashMap<String, Arc<SourceProcessor>> = HashMap::new();
-
-    for source in app_config.sources_config().sources.keys() {
-        let source_config = app_config.sources_config().sources
-            .get(source)
-            .context("Source config is not set")?;
-        
+    
+    for (source_id, source_config) in app_config.sources_config().sources.iter() {
         // Start processor
         let processor = Arc::new(
             SourceProcessor::new(
-                source.to_string(), 
+                source_id.to_string(),
                 source_config.clone()
-            ).await
+            )
         );
-
+        
         processors.insert(
-            source.to_string(),
+            source_id.to_string(),
             processor
         );
     }
-
+    
     // Set to global variable
-    *PROCESSORS.write().await = processors;
-
+    *PROCESSORS.write().unwrap() = processors;
+    
     Ok(())
 }
 
@@ -140,13 +132,13 @@ impl SourceStats {
 /// rate, having minimal effect on the end user's experience.
 pub struct SourceProcessor {
     // Settings for multi-threading
-    queue: Arc<FixedSizeQueue<RawFrame>>,
+    queue: Arc<FixedSizeQueue<Arc<RawFrame>>>,
     process_handle: tokio::task::JoinHandle<()>,
     stats_handle: tokio::task::JoinHandle<()>,
 
     // Source specific settings
     source_id: String,
-    source_config: SourceConfig,
+    source_config: Arc<SourceConfig>,
 
     // Source statistics
     source_stats: Arc<SourceStats>
@@ -160,85 +152,72 @@ impl SourceProcessor {
     /// of our code.
     /// 2. Reports statistics about the given source processor in terms performance, including times of 
     /// processing, how many successful/failed frames we have and what is our general success rate 
-    pub async fn new(
+    pub fn new(
         source_id: String,
         source_config: SourceConfig
     ) -> Self {
         // Create global counters
         let source_stats = Arc::new(SourceStats::new());
+        let source_config = Arc::new(source_config);
         
         // Create a queue for frames. We set a maximum number of frames possible to be in queue at a given time
         // When the limit reaches, it drops the oldest frame in the queue, making it possible for new frames
         // to be added to the queue and be processed.
         let queue_stats = Arc::clone(&source_stats);
-        let queue_drop_callback = move |_: &RawFrame| {
+        let queue_drop_callback = move |_: Arc<RawFrame>| {
             queue_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
         };
-        let source_queue = Arc::new(FixedSizeQueue::<RawFrame>::new(MAX_QUEUE_FRAMES, Some(queue_drop_callback)));
-        let queue_parallel_limit = Arc::new(Semaphore::new(MAX_PARALLEL_FRAME_PROCESSING));
+        let source_queue = Arc::new(FixedSizeQueue::<Arc<RawFrame>>::new(MAX_QUEUE_FRAMES, Some(queue_drop_callback)));
         
         // Create a seperate task for handling frames - performing inference
-        let process_queue_parallel_limit = Arc::clone(&queue_parallel_limit);
         let process_source_queue = Arc::clone(&source_queue);
         let process_source_id = source_id.clone();
-        let process_source_config = source_config.clone();
+        let process_source_config = Arc::clone(&source_config);
         let process_source_stats = Arc::clone(&source_stats);
 
         let process_handle = tokio::spawn(async move {
             let frame_process: Result<()> = async {
                 loop {
-                    // Try to acquire permit without blocking
-                    match Arc::clone(&process_queue_parallel_limit).try_acquire_owned() {
-                        Ok(permit) => {
-                            // Only pull from queue when we have a permit available
-                            if let Some(frame) = process_source_queue.receiver.recv().await {
-                                // Move values to the new thread
-                                let process_source_id = process_source_id.clone();
-                                let process_source_config = process_source_config.clone();
-                                let process_source_stats = Arc::clone(&process_source_stats);
+                    // Only pull from queue when we have a permit available
+                    if let Some(frame) = process_source_queue.receiver.recv().await {
+                        // Move values to the new thread
+                        let process_source_id = process_source_id.clone();
+                        let process_source_config = Arc::clone(&process_source_config);
+                        let process_source_stats = Arc::clone(&process_source_stats);
+                        let process_frame = Arc::clone(&frame);
 
-                                // Spawn processing in a new thread with permit
-                                tokio::spawn(async move {
-                                    // Keep permit alive until processing completes
-                                    let _permit = permit;
-                                    
-                                    let process_result = Self::process_frame_internal(
-                                        &process_source_id,
-                                        &process_source_config,
-                                        &frame
-                                    ).await;
+                        // Spawn processing in a new thread with permit
+                        tokio::spawn(async move {
+                            let process_result = Self::process_frame_internal(
+                                &process_source_id,
+                                &process_source_config,
+                                &process_frame
+                            ).await;
 
-                                    // Count processing statistics
-                                    process_source_stats.frames_total.fetch_add(1, Ordering::Relaxed);
-                                    process_source_stats.frames_expected.fetch_add(1, Ordering::Relaxed);
-                                    match &process_result {
-                                        Ok(stats) => {
-                                            process_source_stats.frames_success.fetch_add(1, Ordering::Relaxed);
+                            // Count processing statistics
+                            process_source_stats.frames_total.fetch_add(1, Ordering::Relaxed);
+                            process_source_stats.frames_expected.fetch_add(1, Ordering::Relaxed);
+                            match &process_result {
+                                Ok(stats) => {
+                                    process_source_stats.frames_success.fetch_add(1, Ordering::Relaxed);
 
-                                            // Add inference statistics to counters
-                                            process_source_stats.add_stats(&stats);
-                                        },
-                                        Err(_) => {
-                                            process_source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                    }
-                                    
-                                    // Handle processing error
-                                    if let Err(e) = process_result {
-                                        tracing::error!(
-                                            source_id=process_source_id,
-                                            error=e.to_string(),
-                                            "error processing source frame"
-                                        )
-                                    };
-                                });
+                                    // Add inference statistics to counters
+                                    process_source_stats.add_stats(&stats);
+                                },
+                                Err(_) => {
+                                    process_source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
-                        }
-                        Err(_) => {
-                            // No permits available - yield control to other tasks
-                            // This prevents busy-waiting while allowing quick retry
-                            tokio::task::yield_now().await;
-                        }
+                            
+                            // Handle processing error
+                            if let Err(e) = process_result {
+                                tracing::error!(
+                                    source_id=process_source_id,
+                                    error=e.to_string(),
+                                    "error processing source frame"
+                                )
+                            };
+                        });
                     }
                 }
             }.await;
@@ -276,9 +255,6 @@ impl SourceProcessor {
             }
         });
 
-        // Start separate tasks
-        tokio::task::yield_now().await;
-
         tracing::info!(
             source_id=source_id,
             "initiated client processing"
@@ -295,18 +271,21 @@ impl SourceProcessor {
     }
 
     /// Sends inference requests to a seperate thread pool
-    pub fn process_frame(&self, raw_frame: Vec<u8>, height: usize, width: usize) {
+    pub fn process_frame(&self, raw_frame: Vec<u8>, height: usize, width: usize, pts: u64) {
         let frames_total = self.source_stats.frames_total.load(Ordering::Relaxed);
 
         // Send inference results on every N frame
         if (frames_total + 1) % (self.source_config.inf_frame as u64) == 0 {
             // Create new frame object
-            let frame = RawFrame {
-                data: raw_frame,
-                height,
-                width,
-                added: Instant::now()
-            };
+            let frame = Arc::new(
+                RawFrame {
+                    data: raw_frame,
+                    height,
+                    width,
+                    pts,
+                    added: Instant::now()
+                }
+            );
 
             // Send new frame to queue
             if let Err(e) = self.queue.sender.send_sync(frame) {
@@ -408,7 +387,7 @@ impl SourceProcessor {
     }
 
     /// Populates BBOXes to third party services
-    pub async fn populate_bboxes(source_id: &str, bboxes: Vec<ResultBBOX>) {
+    pub async fn populate_bboxes(source_id: &str, frame: &RawFrame, bboxes: Vec<ResultBBOX>) {
         // Populate to Kafka
         if let Ok(kafka_producer) = kafka::get_kafka_producer() {
             if let Ok(data) = serde_json::to_string(&bboxes) {

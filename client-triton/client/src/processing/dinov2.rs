@@ -430,6 +430,7 @@ pub async fn process_frame(
     source_id: &str,
     frame: &RawFrame
 ) -> Result<FrameProcessStats> {
+    let queue_time = frame.added.elapsed();
     let inference_start = Instant::now();
 
     // Pre process image
@@ -457,8 +458,7 @@ pub async fn process_frame(
     let results_time = measure_start.elapsed();
 
     // Create statistics object
-    let processing_time = frame.added.elapsed();
-    let queue_time = processing_time - inference_start.elapsed();
+    let processing_time = inference_start.elapsed() + queue_time;
     let stats = FrameProcessStats {
         queue: queue_time.as_micros() as u64,
         pre_processing: pre_proc_time.as_micros() as u64, 
