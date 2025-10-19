@@ -112,7 +112,6 @@ impl ClientVideo {
     }
 
     pub fn init_sources(&self, source_ids: Vec<String>) -> Result<()> {
-
         unsafe {
             let lib_init_multiple_sources: Symbol<InitMultipleSourcesFn> = self.library().get(b"InitMultipleSources")
                 .context("Cannot get 'InitMultipleSources' function")?;
@@ -127,6 +126,7 @@ impl ClientVideo {
 
         Ok(())
     }
+    
     pub fn populate_bboxes() {
 
     }

@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Query
 from models import BBoxCreate
 from bbox_manager import BBoxManager
+from websocket_manager import manager as ws_manager
 
 router = APIRouter(prefix="/bboxes", tags=["bboxes"])
 
 @router.post("/")
-def add_bboxes(bbox_data: BBoxCreate):
-    """Add bounding boxes for a specific PTS (auto-cleanup old data)"""
-    return BBoxManager.add_bboxes(bbox_data)
+async def add_bboxes(bbox_data: BBoxCreate):
+    """Add bounding boxes for a specific PTS and broadcast via WebSocket"""
+    return await BBoxManager.add_bboxes(bbox_data, websocket_manager=ws_manager)
 
 @router.get("/{video_id}/range")
 def get_bboxes_range(
@@ -15,7 +16,7 @@ def get_bboxes_range(
     from_pts: int = Query(..., description="Start PTS in milliseconds"),
     to_pts: int = Query(..., description="End PTS in milliseconds")
 ):
-    """Get all bboxes between two PTS values (inclusive)"""
+    """Get all bboxes between two PTS values (inclusive) - for fallback/history"""
     return BBoxManager.get_bboxes_range(video_id, from_pts, to_pts)
 
 @router.get("/{video_id}")

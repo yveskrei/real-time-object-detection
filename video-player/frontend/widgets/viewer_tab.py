@@ -7,11 +7,12 @@ from widgets.video_player import VideoPlayerWidget
 
 
 class ViewerTab(QWidget):
-    """Tab for viewing active streams"""
+    """Tab for viewing active streams with WebSocket support"""
     
-    def __init__(self, api_client, parent=None):
+    def __init__(self, api_client, backend_url: str, parent=None):
         super().__init__(parent)
         self.api_client = api_client
+        self.backend_url = backend_url  # Store backend URL for WebSocket connections
         self.active_players = {}
         self.setup_ui()
         
@@ -28,19 +29,16 @@ class ViewerTab(QWidget):
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Select Stream to Watch:"))
         
-        # Dropdown with pointer cursor and auto-adjust width
         self.stream_combo = QComboBox()
         self.stream_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stream_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         controls.addWidget(self.stream_combo)
         
-        # Add Stream button with pointer cursor
         add_btn = QPushButton("Start Stream")
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.clicked.connect(self.add_stream_player)
         controls.addWidget(add_btn)
         
-        # Refresh button with pointer cursor
         refresh_btn = QPushButton("Refresh Streams")
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.clicked.connect(self.refresh_streams)
@@ -92,7 +90,7 @@ class ViewerTab(QWidget):
             return
         
         try:
-            # Get stream info (includes stream_start_time_ms)
+            # Get stream info
             status = self.api_client.get_stream_status(video_id)
             if not status['is_streaming']:
                 QMessageBox.warning(self, "Not Streaming", "This stream is not active!")
@@ -105,9 +103,16 @@ class ViewerTab(QWidget):
                 QMessageBox.critical(self, "Error", "Stream metadata missing! Restart the stream.")
                 return
             
-            # Create video player with global stream start time
-            player = VideoPlayerWidget(video_id, stream_url, stream_start_time, self.api_client)
-            player.closed.connect(self.remove_player)  # Connect close signal
+            # Create video player with WebSocket support
+            player = VideoPlayerWidget(
+                video_id,
+                stream_url,
+                stream_start_time,
+                self.backend_url,  # Pass backend URL for WebSocket
+                replay_duration_seconds=30.0,
+                buffer_delay_ms=200
+            )
+            player.closed.connect(self.remove_player)
             
             # Add to grid (2 columns)
             row = len(self.active_players) // 2
@@ -124,26 +129,20 @@ class ViewerTab(QWidget):
         if video_id in self.active_players:
             player = self.active_players[video_id]
             
-            # Remove from layout
             self.players_layout.removeWidget(player)
             player.deleteLater()
             
-            # Remove from dictionary
             del self.active_players[video_id]
             
-            # Reorganize grid layout
             self.reorganize_players()
     
     def reorganize_players(self):
         """Reorganize players in grid after removal"""
-        # Get all remaining players
         players = list(self.active_players.values())
         
-        # Clear layout (this doesn't delete widgets, just removes them from layout)
         for i in reversed(range(self.players_layout.count())):
             self.players_layout.itemAt(i).widget().setParent(None)
         
-        # Re-add players in grid (2 columns)
         for idx, player in enumerate(players):
             row = idx // 2
             col = idx % 2

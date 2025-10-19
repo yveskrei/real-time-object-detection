@@ -8,7 +8,7 @@ use tokio::time::sleep;
 
 use crate::player_proxy::PlayerSession;
 use crate::TOKIO_RUNTIME;
-use crate::{FramesCallback, SourceStoppedCallback, SourceNameCallback, SourceStatusCallback};
+use crate::{SourceFramesCallback, SourceStoppedCallback, SourceNameCallback, SourceStatusCallback};
 use crate::{log_info, log_error, log_debug};
 
 // Stream timeout constant
@@ -43,7 +43,7 @@ pub struct StreamManager {
 
 #[derive(Clone, Copy)]
 struct Callbacks {
-    frames: FramesCallback,
+    source_frames: SourceFramesCallback,
     source_stopped: SourceStoppedCallback,
     source_name: SourceNameCallback,
     source_status: SourceStatusCallback,
@@ -74,13 +74,13 @@ impl StreamManager {
 
     pub fn set_callbacks(
         &self,
-        frames: FramesCallback,
+        source_frames: SourceFramesCallback,
         source_stopped: SourceStoppedCallback,
         source_name: SourceNameCallback,
         source_status: SourceStatusCallback,
     ) {
         let callbacks = Callbacks {
-            frames,
+            source_frames,
             source_stopped,
             source_name,
             source_status,
@@ -335,7 +335,7 @@ fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager
     if scaler.run(&first_frame, &mut rgb_frame).is_ok() {
         let pts = first_frame.pts().unwrap_or(0);
         let data_ptr = rgb_frame.data(0).as_ptr();
-        (callbacks.frames)(source_id, data_ptr, width as i32, height as i32, pts as u64);
+        (callbacks.source_frames)(source_id, data_ptr, width as i32, height as i32, pts as u64);
         
         log_info!("[Source {}] Started receiving frames ({}x{}), PTS: {}", 
                      source_id, width, height, pts);
@@ -378,7 +378,7 @@ fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager
                 let data_ptr = rgb_frame.data(0).as_ptr();
 
                 // Call frames callback with raw PTS
-                (callbacks.frames)(source_id, data_ptr, width, height, pts as u64);
+                (callbacks.source_frames)(source_id, data_ptr, width, height, pts as u64);
             }
         }
     }
@@ -426,10 +426,10 @@ pub fn start_streams(source_ids: Vec<i32>, log_level: LogLevel) -> Result<()> {
 
 /// Set the callbacks for stream events
 pub fn set_callbacks(
-    frames: FramesCallback,
+    source_frames: SourceFramesCallback,
     source_stopped: SourceStoppedCallback,
     source_name: SourceNameCallback,
     source_status: SourceStatusCallback,
 ) {
-    STREAM_MANAGER.set_callbacks(frames, source_stopped, source_name, source_status);
+    STREAM_MANAGER.set_callbacks(source_frames, source_stopped, source_name, source_status);
 }

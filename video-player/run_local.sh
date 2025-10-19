@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # Configuration
 PORT=8702

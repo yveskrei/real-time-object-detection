@@ -26,7 +26,7 @@ impl PlayerSession {
     /// Create a new player session from environment variable
     pub fn new() -> Result<Self> {
         let base_url = env::var("PLAYER_BACKEND_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8702".to_string());
+            .context("PLAYER_BACKEND_URL variable is not set")?;
         
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -73,7 +73,7 @@ impl Default for PlayerSession {
             let client = Client::new();
             Self {
                 client,
-                base_url: "http://127.0.0.1:8702".to_string(),
+                base_url: "".to_string(),
             }
         })
     }

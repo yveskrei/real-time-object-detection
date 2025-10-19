@@ -37,20 +37,20 @@ macro_rules! log_debug {
 }
 
 // C Types
-pub type FramesCallback = extern "C" fn(source_id: c_int, frame: *const u8, width: c_int, height: c_int, pts: c_ulonglong);
+pub type SourceFramesCallback = extern "C" fn(source_id: c_int, frame: *const u8, width: c_int, height: c_int, pts: c_ulonglong);
 pub type SourceStoppedCallback = extern "C" fn(source_id: c_int);
 pub type SourceNameCallback = extern "C" fn(source_id: c_int, source_name: *const c_char);
 pub type SourceStatusCallback = extern "C" fn(source_id: c_int, source_status: c_int);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn SetCallbacks(
-    frames: FramesCallback,
+    source_frames: SourceFramesCallback,
     source_stopped: SourceStoppedCallback,
     source_name: SourceNameCallback,
     source_status: SourceStatusCallback,
 ) {
     log_info!("SetCallbacks called");
-    stream::set_callbacks(frames, source_stopped, source_name, source_status);
+    stream::set_callbacks(source_frames, source_stopped, source_name, source_status);
 }
 
 #[unsafe(no_mangle)]
