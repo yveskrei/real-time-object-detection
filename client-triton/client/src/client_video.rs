@@ -94,40 +94,58 @@ impl ClientVideo {
     }
 
     // Library function
-    fn set_callbacks(&self) -> Result<()> {
-        unsafe {
-            let lib_set_callbacks: Symbol<SetCallbacksFn> = self.library().get(b"SetCallbacks")
-                .context("Cannot get 'SetCallbacks' function")?;
+    pub async fn set_callbacks() -> Result<()> {
+        let client_video = get_client_video()?;
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            unsafe {
+                let lib_set_callbacks: Symbol<SetCallbacksFn> = client_video.library().get(b"SetCallbacks")
+                    .context("Cannot get 'SetCallbacks' function")?;
 
 
-            lib_set_callbacks(
-                ClientVideo::_source_frames_callback,
-                ClientVideo::_source_stopped_callback,
-                ClientVideo::_source_name_callback,
-                ClientVideo::_source_status_callback
-            )
-        }
+                lib_set_callbacks(
+                    ClientVideo::_source_frames_callback,
+                    ClientVideo::_source_stopped_callback,
+                    ClientVideo::_source_name_callback,
+                    ClientVideo::_source_status_callback
+                )
+            }
+
+            Ok(())
+        }).await
+            .context("Error trying to set callbacks in video client")?
+            .context("Error setting callbacks in video client")?;
 
         Ok(())
     }
 
-    pub fn init_sources(&self, source_ids: Vec<String>) -> Result<()> {
-        unsafe {
-            let lib_init_multiple_sources: Symbol<InitMultipleSourcesFn> = self.library().get(b"InitMultipleSources")
-                .context("Cannot get 'InitMultipleSources' function")?;
+    pub async fn init_sources(source_ids: Vec<String>) -> Result<()> {
+        let client_video = get_client_video()?;
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            unsafe {
+                let lib_init_multiple_sources: Symbol<InitMultipleSourcesFn> = client_video.library().get(b"InitMultipleSources")
+                    .context("Cannot get 'InitMultipleSources' function")?;
 
 
-            lib_init_multiple_sources(
-                source_ids.as_ptr() as *const c_int, 
-                source_ids.len() as c_int, 
-                LogLevel::Regular as c_int
-            )
-        }
+                lib_init_multiple_sources(
+                    source_ids.as_ptr() as *const c_int, 
+                    source_ids.len() as c_int, 
+                    LogLevel::Regular as c_int
+                )
+            }
+
+            Ok(())
+        }).await
+            .context("Error trying to initiate sources in video client")?
+            .context("Error initiating source in video client")?;
 
         Ok(())
     }
     
-    pub fn populate_bboxes() {
+    pub fn populate_bboxes(
+        
+    ) {
 
     }
 
@@ -142,6 +160,7 @@ impl ClientVideo {
         let source_id = source_id.to_string();
         let width = width as usize;
         let height = height as usize;
+        let frame_size = (width * height * 3) as usize;
 
         match source::get_source_processor(&source_id) {
             Err(e) => {
@@ -152,7 +171,7 @@ impl ClientVideo {
                 )
             },
             Ok(processor) => {
-                match ClientVideo::get_c_array(frame, (width * height * 3) as usize) {
+                match ClientVideo::get_c_array(frame, frame_size) {
                     Err(e) => {
                         tracing::error!(
                             error=e.to_string(),
@@ -204,11 +223,10 @@ impl ClientVideo {
 
     // Helper functions
     fn free_c_ptr<T>(ptr: *const T) -> Result<()> {
-        let library = get_client_video()?
-            .library();
+        let client_video = get_client_video()?;
 
         unsafe {
-            let lib_free_c_ptr: Symbol<FreeCPtrFn> = library.get(b"FreeCPtr")
+            let lib_free_c_ptr: Symbol<FreeCPtrFn> = client_video.library().get(b"FreeCPtr")
                 .context("Cannot get 'FreeCPtr' function")?;
 
             // Call library function

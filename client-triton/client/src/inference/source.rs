@@ -8,6 +8,7 @@ use anyhow::{Result, Context};
 use tokio::time::{Duration, interval, Instant};
 use serde_json::json;
 use std::sync::{LazyLock, RwLock};
+use tokio::sync::{Semaphore};
 
 // Custom modules
 use crate::inference::{
@@ -22,6 +23,7 @@ use crate::utils::kafka;
 // Variables
 pub static PROCESSORS: LazyLock<RwLock<HashMap<String, Arc<SourceProcessor>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 pub static MAX_QUEUE_FRAMES: usize = 5;
+pub static MAX_PARALLEL_FRAME_PROCESSING: usize = 5;
 pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Returns a source processor instance by given stream ID
@@ -133,11 +135,12 @@ impl SourceStats {
 pub struct SourceProcessor {
     // Settings for multi-threading
     queue: Arc<FixedSizeQueue<Arc<RawFrame>>>,
+    queue_semaphore: Arc<Semaphore>,
     process_handle: tokio::task::JoinHandle<()>,
     stats_handle: tokio::task::JoinHandle<()>,
 
     // Source specific settings
-    source_id: String,
+    source_id: Arc<String>,
     source_config: Arc<SourceConfig>,
 
     // Source statistics
@@ -157,6 +160,7 @@ impl SourceProcessor {
         source_config: SourceConfig
     ) -> Self {
         // Create global counters
+        let source_id = Arc::new(source_id);
         let source_stats = Arc::new(SourceStats::new());
         let source_config = Arc::new(source_config);
         
@@ -168,63 +172,81 @@ impl SourceProcessor {
             queue_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
         };
         let source_queue = Arc::new(FixedSizeQueue::<Arc<RawFrame>>::new(MAX_QUEUE_FRAMES, Some(queue_drop_callback)));
+        let queue_semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_FRAME_PROCESSING));
         
         // Create a seperate task for handling frames - performing inference
+        let process_queue_semaphore = Arc::clone(&queue_semaphore);
         let process_source_queue = Arc::clone(&source_queue);
-        let process_source_id = source_id.clone();
+        let process_source_id = Arc::clone(&source_id);
         let process_source_config = Arc::clone(&source_config);
         let process_source_stats = Arc::clone(&source_stats);
 
         let process_handle = tokio::spawn(async move {
             let frame_process: Result<()> = async {
                 loop {
-                    // Only pull from queue when we have a permit available
-                    if let Some(frame) = process_source_queue.receiver.recv().await {
-                        // Move values to the new thread
-                        let process_source_id = process_source_id.clone();
-                        let process_source_config = Arc::clone(&process_source_config);
-                        let process_source_stats = Arc::clone(&process_source_stats);
-                        let process_frame = Arc::clone(&frame);
+                    // Try to acquire permit without blocking
+                    match Arc::clone(&process_queue_semaphore).acquire_owned().await {
+                        Ok(permit) => {
+                            // Only pull from queue when we have a permit available
+                            if let Some(frame) = process_source_queue.receiver.recv().await {
+                                // Move values to the new thread
+                                let process_source_id_ext = Arc::clone(&process_source_id);
+                                let process_source_id_int = Arc::clone(&process_source_id);
+                                let process_source_config = Arc::clone(&process_source_config);
+                                let process_source_stats = Arc::clone(&process_source_stats);
+                                let process_frame = Arc::clone(&frame);
 
-                        // Spawn processing in a new thread with permit
-                        tokio::spawn(async move {
-                            let process_result = Self::process_frame_internal(
-                                &process_source_id,
-                                &process_source_config,
-                                &process_frame
-                            ).await;
+                                // Spawn processing in a new thread with permit
+                                tokio::spawn(async move {
+                                    // Keep permit alive until processing completes
+                                    let _permit = permit;
 
-                            // Count processing statistics
-                            process_source_stats.frames_total.fetch_add(1, Ordering::Relaxed);
-                            process_source_stats.frames_expected.fetch_add(1, Ordering::Relaxed);
-                            match &process_result {
-                                Ok(stats) => {
-                                    process_source_stats.frames_success.fetch_add(1, Ordering::Relaxed);
+                                    let process_result = Self::process_frame_internal(
+                                        &process_source_id_int,
+                                        &process_source_config,
+                                        &process_frame
+                                    ).await;
 
-                                    // Add inference statistics to counters
-                                    process_source_stats.add_stats(&stats);
-                                },
-                                Err(_) => {
-                                    process_source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
-                                }
+                                    // Count processing statistics
+                                    process_source_stats.frames_total.fetch_add(1, Ordering::Relaxed);
+                                    process_source_stats.frames_expected.fetch_add(1, Ordering::Relaxed);
+                                    match &process_result {
+                                        Ok(stats) => {
+                                            process_source_stats.frames_success.fetch_add(1, Ordering::Relaxed);
+
+                                            // Add inference statistics to counters
+                                            process_source_stats.add_stats(&stats);
+                                        },
+                                        Err(_) => {
+                                            process_source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    
+                                    // Handle processing error
+                                    if let Err(e) = process_result {
+                                        tracing::error!(
+                                            source_id=&*process_source_id_ext,
+                                            error=e.to_string(),
+                                            "error processing source frame"
+                                        )
+                                    };
+                                });
                             }
-                            
-                            // Handle processing error
-                            if let Err(e) = process_result {
-                                tracing::error!(
-                                    source_id=process_source_id,
-                                    error=e.to_string(),
-                                    "error processing source frame"
-                                )
-                            };
-                        });
+                        },
+                        Err(e) => {
+                            tracing::info!(
+                                source_id=&*process_source_id,
+                                error=e.to_string(),
+                                "Error acquiring permit for parallelism. Should not happen"
+                            )
+                        }
                     }
                 }
             }.await;
 
             if let Err(e) = frame_process {
                 tracing::error!(
-                    source_id=process_source_id,
+                    source_id=&*process_source_id,
                     error=e.to_string(),
                     "Stopped processing frames - due to fatal error"
                 )
@@ -256,12 +278,13 @@ impl SourceProcessor {
         });
 
         tracing::info!(
-            source_id=source_id,
+            source_id=&*source_id,
             "initiated client processing"
         );
         
         Self {
             queue: source_queue,
+            queue_semaphore,
             process_handle,
             stats_handle,
             source_id,
@@ -292,7 +315,7 @@ impl SourceProcessor {
                 self.source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
 
                 tracing::error!(
-                    source_id=&self.source_id,
+                    source_id=&*self.source_id,
                     error=e.to_string(),
                     "source frame queue is full"
                 )
