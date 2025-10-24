@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox,
-    QLabel, QScrollArea, QMessageBox, QGridLayout
+    QLabel, QScrollArea, QMessageBox, QGridLayout, QDoubleSpinBox
 )
 from PyQt6.QtCore import QTimer, Qt
 from widgets.video_player import VideoPlayerWidget
@@ -25,8 +25,10 @@ class ViewerTab(QWidget):
         """Setup the viewer UI"""
         layout = QVBoxLayout(self)
         
-        # Controls
+        # Top controls row
         controls = QHBoxLayout()
+        
+        # Left side - Stream selection
         controls.addWidget(QLabel("Select Stream to Watch:"))
         
         self.stream_combo = QComboBox()
@@ -44,7 +46,33 @@ class ViewerTab(QWidget):
         refresh_btn.clicked.connect(self.refresh_streams)
         controls.addWidget(refresh_btn)
         
+        # Spacer to push right-side controls to the right
         controls.addStretch()
+        
+        # Right side - Confidence control and hide bboxes button
+        controls.addWidget(QLabel("Min Confidence:"))
+        
+        self.confidence_spinner = QDoubleSpinBox()
+        self.confidence_spinner.setRange(0.0, 1.0)
+        self.confidence_spinner.setSingleStep(0.05)
+        self.confidence_spinner.setValue(0.0)
+        self.confidence_spinner.setDecimals(2)
+        self.confidence_spinner.setPrefix("")
+        self.confidence_spinner.setSuffix("")
+        self.confidence_spinner.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        self.confidence_spinner.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.confidence_spinner.setFixedWidth(80)
+        self.confidence_spinner.valueChanged.connect(self.on_confidence_changed)
+        self.confidence_spinner.setToolTip("Set minimum confidence threshold for displaying bounding boxes")
+        controls.addWidget(self.confidence_spinner)
+        
+        self.hide_bboxes_btn = QPushButton("Hide BBoxes")
+        self.hide_bboxes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hide_bboxes_btn.setCheckable(True)
+        self.hide_bboxes_btn.clicked.connect(self.toggle_all_bboxes)
+        self.hide_bboxes_btn.setToolTip("Toggle visibility of all bounding boxes")
+        controls.addWidget(self.hide_bboxes_btn)
+        
         layout.addLayout(controls)
         
         # Scroll area for video players
@@ -61,6 +89,21 @@ class ViewerTab(QWidget):
         
         # Initial refresh
         self.refresh_streams()
+    
+    def on_confidence_changed(self, value: float):
+        """Update confidence threshold for all active players"""
+        for player in self.active_players.values():
+            if hasattr(player, 'bbox_overlay'):
+                player.bbox_overlay.set_min_confidence(value)
+    
+    def toggle_all_bboxes(self, checked: bool):
+        """Toggle bbox visibility for all active players"""
+        for player in self.active_players.values():
+            if hasattr(player, 'bbox_overlay'):
+                player.bbox_overlay.toggle_visibility(not checked)
+        
+        # Update button text
+        self.hide_bboxes_btn.setText("Show BBoxes" if checked else "Hide BBoxes")
     
     def refresh_streams(self):
         """Refresh list of active streams"""
@@ -113,6 +156,15 @@ class ViewerTab(QWidget):
                 buffer_delay_ms=200
             )
             player.closed.connect(self.remove_player)
+            
+            # Apply current confidence threshold to new player
+            if hasattr(player, 'bbox_overlay'):
+                player.bbox_overlay.set_min_confidence(self.confidence_spinner.value())
+            
+            # Apply current bbox visibility state to new player
+            if self.hide_bboxes_btn.isChecked():
+                if hasattr(player, 'bbox_overlay'):
+                    player.bbox_overlay.toggle_visibility(False)
             
             # Add to grid (2 columns)
             row = len(self.active_players) // 2

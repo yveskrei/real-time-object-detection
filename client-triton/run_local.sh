@@ -21,9 +21,8 @@ while true; do
 done
 
 # Set environment variables
-export APP_LOCAL="true"
-export APP_ENV="NP"
 export PLAYER_BACKEND_URL="http://127.0.0.1:8702"
+export RUST_LOG=INFO
 
 # Start binary
 cd client

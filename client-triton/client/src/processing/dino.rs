@@ -8,11 +8,11 @@ use std::arch::x86_64::*;
 // Custom modules
 use crate::inference::{
     source::FrameProcessStats, 
-    InferenceModel, 
-    InferencePrecision
+    InferenceModel
 };
 use crate::processing::{self, RawFrame, ResultEmbedding};
 use crate::inference::source::SourceProcessor;
+use crate::utils::config::InferencePrecision;
 
 /// ImageNet normalization constants
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
@@ -454,7 +454,11 @@ pub async fn process_frame(
 
     // Populate results
     let measure_start = Instant::now();
-    SourceProcessor::populate_embedding(source_id, embedding).await;
+    SourceProcessor::populate_embedding(
+        source_id, 
+        frame,
+        embedding
+    ).await;
     let results_time = measure_start.elapsed();
 
     // Create statistics object

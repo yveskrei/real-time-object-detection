@@ -6,8 +6,9 @@ use tokio::time::Instant;
 use serde::Serialize;
 
 // Custom modules
+pub mod preprocessing;
 pub mod yolo;
-pub mod dinov2;
+pub mod dino;
 
 /// Represents raw frame before performing inference on it
 #[derive(Clone, Debug)]
@@ -39,12 +40,37 @@ impl ResultBBOX {
             _ => Box::leak(self.class.to_string().into_boxed_str())
         }
     }
+
+    pub fn corners_coordinates(&self, frame: &RawFrame) -> (usize, usize) {
+        // Extract bbox coordinates [x1, y1, x2, y2]
+        let x1 = self.bbox[0] as usize;
+        let y1 = self.bbox[1] as usize;
+        let x2 = self.bbox[2] as usize;
+        let y2 = self.bbox[3] as usize;
+        
+        // Calculate 1D array indices
+        let top_left_corner = y1 * frame.width + x1;
+        let bottom_right_corner = y2 * frame.width + x2;
+
+        return (top_left_corner, bottom_right_corner)
+    }
 }
 
 /// Represents embedding output from the model inference results
 #[derive(Clone, Serialize)]
 pub struct ResultEmbedding {
     pub data: Vec<f32>
+}
+
+impl ResultEmbedding {
+    pub fn get_raw_bytes(&self) -> Vec<u8> {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.data.as_ptr() as *const u8,
+                self.data.len() * std::mem::size_of::<f32>()
+            )
+        }.to_vec()
+    }
 }
 
 /// Lookup table for converting values from FP16 to FP32

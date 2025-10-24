@@ -6,7 +6,7 @@ use client::utils::{
     kafka,
     config::AppConfig
 };
-use client::client_video;
+use client::client_video::{self, ClientVideo};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
@@ -20,12 +20,11 @@ async fn main() -> Result<()> {
         .context("Error initiating Kafka producer")?;
 
     // Initiate inference client
-    inference::init_inference_model(&app_config)
+    inference::init_inference_models(&app_config)
         .await
         .context("Error initiating inference model")?;
 
-    //Initiate inference client
-    inference::start_model_instances(&app_config)
+    inference::start_models_instances(&app_config)
         .await
         .context("Error initiating inference model instances")?;
 
@@ -34,8 +33,15 @@ async fn main() -> Result<()> {
         .context("Error initiating source processors")?;
 
     // Initiate video client
-    client_video::init_client_video(&app_config)
+    client_video::init_client_video()
         .context("Error initiating video client")?;
+
+    // Start receiving frames from sources
+    ClientVideo::set_callbacks().await
+        .context("Error setting Client Video callbacks")?;
+
+    ClientVideo::init_sources(&app_config).await
+        .context("Error setting Client Video callbacks")?;
 
     Ok(())
 }

@@ -29,7 +29,6 @@ export RUSTFLAGS="-C link-args=-Wl,--whole-archive \
 -Wl,--no-whole-archive \
 -lstdc++ -lm -lz -lpthread -ldl"
 
-cargo clean
 cargo build --release
 
 echo "✅ Build complete!"

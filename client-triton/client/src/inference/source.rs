@@ -6,19 +6,18 @@ use std::sync::atomic::{Ordering, AtomicU64};
 use std::collections::HashMap;
 use anyhow::{Result, Context};
 use tokio::time::{Duration, interval, Instant};
-use serde_json::json;
 use std::sync::{LazyLock, RwLock};
 use tokio::sync::{Semaphore};
 
 // Custom modules
 use crate::inference::{
     self, 
-    queue::FixedSizeQueue, 
-    InferenceModelType
+    queue::FixedSizeQueue
 };
 use crate::processing::{self, RawFrame, ResultBBOX, ResultEmbedding};
-use crate::utils::config::{AppConfig, SourceConfig};
-use crate::utils::kafka;
+use crate::utils::config::{AppConfig, SourceConfig, InferenceModelType, InferenceTask};
+use crate::utils::kafka::Kafka;
+use crate::client_video::ClientVideo;
 
 // Variables
 pub static PROCESSORS: LazyLock<RwLock<HashMap<String, Arc<SourceProcessor>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -45,7 +44,8 @@ pub fn init_source_processors(app_config: &AppConfig) -> Result<()> {
         let processor = Arc::new(
             SourceProcessor::new(
                 source_id.to_string(),
-                source_config.clone()
+                source_config.clone(),
+                app_config.inference_config().task
             )
         );
         
@@ -132,6 +132,7 @@ impl SourceStats {
 /// 2. inference_frame: How many frames we want to skip before performing inference. In other words, 
 /// "Inference on every N frame". This allows us to skip inference on frames when source has higher frame
 /// rate, having minimal effect on the end user's experience.
+#[allow(dead_code)]
 pub struct SourceProcessor {
     // Settings for multi-threading
     queue: Arc<FixedSizeQueue<Arc<RawFrame>>>,
@@ -142,9 +143,8 @@ pub struct SourceProcessor {
     // Source specific settings
     source_id: Arc<String>,
     source_config: Arc<SourceConfig>,
-
-    // Source statistics
-    source_stats: Arc<SourceStats>
+    source_stats: Arc<SourceStats>,
+    inference_task: InferenceTask
 }
 
 impl SourceProcessor {
@@ -157,7 +157,8 @@ impl SourceProcessor {
     /// processing, how many successful/failed frames we have and what is our general success rate 
     pub fn new(
         source_id: String,
-        source_config: SourceConfig
+        source_config: SourceConfig,
+        inference_task: InferenceTask
     ) -> Self {
         // Create global counters
         let source_id = Arc::new(source_id);
@@ -201,10 +202,11 @@ impl SourceProcessor {
                                     // Keep permit alive until processing completes
                                     let _permit = permit;
 
-                                    let process_result = Self::process_frame_internal(
-                                        &process_source_id_int,
+                                    let process_result = SourceProcessor::process_frame_internal(
+                                        process_source_id_int,
                                         &process_source_config,
-                                        &process_frame
+                                        process_frame,
+                                        inference_task
                                     ).await;
 
                                     // Count processing statistics
@@ -289,7 +291,8 @@ impl SourceProcessor {
             stats_handle,
             source_id,
             source_config,
-            source_stats
+            source_stats,
+            inference_task
         }
     }
 
@@ -329,30 +332,33 @@ impl SourceProcessor {
     /// Used to perform inference on a raw frame and return stats about timing
     #[allow(unreachable_patterns)]
     async fn process_frame_internal(
-        source_id: &str,
+        source_id: Arc<String>,
         source_config: &SourceConfig,
-        frame: &RawFrame, 
+        frame: Arc<RawFrame>, 
+        inference_task: InferenceTask
     ) -> Result<FrameProcessStats> {
         // Perform inference on raw frame and populate results
-        let inference_model = inference::get_inference_model()?;
+        let stats = match inference_task {
+            InferenceTask::ObjectDetection => {
+                let inference_model = inference::get_inference_model(InferenceModelType::YOLO)?;
 
-        let stats = match inference_model.model_config().model_type {
-            InferenceModelType::YOLO => {
                 processing::yolo::process_frame(
                     &inference_model,
-                    &source_id,
+                    source_id,
                     &source_config,
-                    &frame
+                    frame
                 ).await?
             },
-            InferenceModelType::DINO => {
-                processing::dinov2::process_frame(
+            InferenceTask::Embedding => {
+                let inference_model = inference::get_inference_model(InferenceModelType::DINO)?;
+
+                processing::dino::process_frame(
                     &inference_model,
                     &source_id,
                     &frame
                 ).await?
-            },
-            _ => anyhow::bail!("Model type is not supported for processing!")
+            }
+            _ => anyhow::bail!("Model task is not supported for processing!")
         };
 
         Ok(stats)
@@ -410,44 +416,58 @@ impl SourceProcessor {
     }
 
     /// Populates BBOXes to third party services
-    pub async fn populate_bboxes(source_id: &str, frame: &RawFrame, bboxes: Vec<ResultBBOX>) {
-        // Populate to Kafka
-        if let Ok(kafka_producer) = kafka::get_kafka_producer() {
-            if let Ok(data) = serde_json::to_string(&bboxes) {
-                let message = json!({
-                    "type": "BBOX",
-                    "data": data
-                }).to_string();
-                
-                if let Err(e) = kafka_producer.produce(Some(source_id), &message).await {
-                    tracing::warn!(
-                        source_id = source_id,
-                        error = %e,
-                        "Failed to populate bboxes to Kafka"
-                    );
-                }
-            }
+    pub async fn populate_bboxes(
+        source_id: Arc<String>, 
+        frame: Arc<RawFrame>, 
+        bboxes: Vec<ResultBBOX>
+    ) {
+        let bboxes = Arc::new(bboxes);
+
+        // Send to client video
+        let client_source_id = Arc::clone(&source_id);
+        let client_frame = Arc::clone(&frame);
+        let client_bboxes = Arc::clone(&bboxes);
+
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            ClientVideo::populate_bboxes(
+                &client_source_id,
+                &client_frame,
+                &client_bboxes
+            )
+        }).await {
+            tracing::warn!(
+                source_id=&*source_id,
+                error=e.to_string(),
+                "Failed to populate bboxes to Kafka"
+            );
         };
+
+
+        // if let Err(e) = Kafka::populate_bboxes(
+        //     source_id,
+        //     frame,
+        //     &bboxes
+        // ).await {
+        //     tracing::warn!(
+        //         source_id=source_id,
+        //         error=e.to_string(),
+        //         "Failed to populate bboxes to Kafka"
+        //     );
+        // };
     }
 
     /// Populates embedding to third party services
-    pub async fn populate_embedding(source_id: &str, embedding: ResultEmbedding) {
-        // Populate to Kafka
-        if let Ok(kafka_producer) = kafka::get_kafka_producer() {
-            if let Ok(data) = serde_json::to_string(&embedding) {
-                let message = json!({
-                    "type": "Embedding",
-                    "data": data
-                }).to_string();
-                
-                if let Err(e) = kafka_producer.produce(Some(source_id), &message).await {
-                    tracing::warn!(
-                        source_id = source_id,
-                        error = %e,
-                        "Failed to populate embedding to Kafka"
-                    );
-                }
-            }
+    pub async fn populate_embedding(source_id: &str, frame: &RawFrame, embedding: ResultEmbedding) {
+        if let Err(e) = Kafka::populate_embedding(
+            source_id,
+            frame,
+            &embedding
+        ).await {
+            tracing::warn!(
+                source_id=source_id,
+                error=e.to_string(),
+                "Failed to populate embedding to Kafka"
+            );
         };
     }
 }

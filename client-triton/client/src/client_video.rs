@@ -4,10 +4,13 @@ use libc::{c_int, c_ulonglong, c_char, c_void};
 use std::slice;
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
+use serde_json::json;
+use std::ffi::CString;
 
 // Custom modules
 use crate::inference::source;
 use crate::utils::config::AppConfig;
+use crate::processing::{RawFrame, ResultBBOX};
 
 /// Client as static global variable
 pub static CLIENT_VIDEO: OnceCell<Arc<ClientVideo>> = OnceCell::new();
@@ -18,23 +21,10 @@ pub fn get_client_video() -> Result<&'static Arc<ClientVideo>> {
         .context("Error getting client video")
 }
 
-pub fn init_client_video(app_config: &AppConfig) -> Result<()> {
+pub fn init_client_video() -> Result<()> {
     // Create new instance
     let client_video = ClientVideo::new()
         .context("Error creating client video")?;
-
-    // Set client callbacks
-    client_video.set_callbacks()
-        .context("Error setting client callbacks")?;
-
-    // Start sources
-    let source_ids: Vec<String> = app_config.sources_config().sources
-        .keys()
-        .cloned()
-        .collect();
-
-    client_video.init_sources(source_ids)
-        .context("Could not start video sources")?;
 
     // Set global variable
     CLIENT_VIDEO.set(Arc::new(client_video))
@@ -99,7 +89,8 @@ impl ClientVideo {
 
         tokio::task::spawn_blocking(move || -> Result<()> {
             unsafe {
-                let lib_set_callbacks: Symbol<SetCallbacksFn> = client_video.library().get(b"SetCallbacks")
+                let lib_set_callbacks: Symbol<SetCallbacksFn> = client_video.library()
+                    .get(b"SetCallbacks")
                     .context("Cannot get 'SetCallbacks' function")?;
 
 
@@ -119,12 +110,23 @@ impl ClientVideo {
         Ok(())
     }
 
-    pub async fn init_sources(source_ids: Vec<String>) -> Result<()> {
+    pub async fn init_sources(app_config: &AppConfig) -> Result<()> {
         let client_video = get_client_video()?;
+
+        // Get sources ids
+        let source_ids: Vec<c_int> = app_config.sources_config().sources
+            .keys()
+            .filter_map(|k| k.parse::<c_int>().ok())
+            .collect();
+
+        if source_ids.len() == 0 {
+            anyhow::bail!("No valid sources are avaliable");
+        }
 
         tokio::task::spawn_blocking(move || -> Result<()> {
             unsafe {
-                let lib_init_multiple_sources: Symbol<InitMultipleSourcesFn> = client_video.library().get(b"InitMultipleSources")
+                let lib_init_multiple_sources: Symbol<InitMultipleSourcesFn> = client_video.library()
+                    .get(b"InitMultipleSources")
                     .context("Cannot get 'InitMultipleSources' function")?;
 
 
@@ -143,10 +145,55 @@ impl ClientVideo {
         Ok(())
     }
     
-    pub fn populate_bboxes(
-        
-    ) {
+    pub fn populate_bboxes(source_id: &str, frame: &RawFrame, bboxes: &[ResultBBOX]) -> Result<()> {
+        // Format BBOXes output for sending it back to the client
+        let bboxes_json: Vec<_> = bboxes
+            .iter()
+            .map(|bbox| {
+                // Get bbox corners - indexes of pixels in frame, as if it was a 1d array
+                let (top_left_corner, bottom_right_corner) = bbox.corners_coordinates(frame);
 
+                json!({
+                    "pts": frame.pts,
+                    "top_left_corner": top_left_corner,
+                    "bottom_right_corner": bottom_right_corner,
+                    "class_name": bbox.class_name(),
+                    "confidence": bbox.score
+                })
+            })
+            .collect();
+        
+        let bboxes_result_json = json!({
+            "stream_id": source_id,
+            "bboxes": bboxes_json
+        }).to_string();
+
+
+        // Send back to client
+        let client_video = get_client_video()?;
+        let results_bboxes = CString::new(bboxes_result_json)
+            .context("Error converting bboxes to C string")?;
+        let results_source_id = source_id.parse::<c_int>()
+            .expect("Failed to convert source id to integer");
+
+        unsafe {
+            let lib_post_results: Symbol<PostResultsFn> = client_video.library()
+                .get(b"PostResults")
+                .context("Cannot get 'PostResults' function")?;
+
+
+            let result = lib_post_results(
+                results_source_id,
+                results_bboxes.into_raw()
+            );
+
+            // Check whether posting failed
+            if result != 0 {
+                anyhow::bail!("Failed to post bboxes")
+            }
+        }
+
+        Ok(())
     }
 
     // Callbacks
@@ -226,7 +273,8 @@ impl ClientVideo {
         let client_video = get_client_video()?;
 
         unsafe {
-            let lib_free_c_ptr: Symbol<FreeCPtrFn> = client_video.library().get(b"FreeCPtr")
+            let lib_free_c_ptr: Symbol<FreeCPtrFn> = client_video.library()
+                .get(b"FreeCPtr")
                 .context("Cannot get 'FreeCPtr' function")?;
 
             // Call library function

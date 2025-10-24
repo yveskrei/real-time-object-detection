@@ -292,13 +292,8 @@ class VideoPlayerWidget(QWidget):
         self.bbox_overlay = BBoxOverlay(self.video_label)
         self.bbox_overlay.setGeometry(self.video_label.geometry())
         
-        # Controls
+        # Controls (removed per-player hide bboxes button, moved to viewer tab)
         controls = QHBoxLayout()
-        
-        self.bbox_toggle = QPushButton("Hide BBoxes")
-        self.bbox_toggle.setCheckable(True)
-        self.bbox_toggle.clicked.connect(self.toggle_bboxes)
-        controls.addWidget(self.bbox_toggle)
         
         # WebSocket status indicator
         self.ws_status = QLabel("🔴 WS: Disconnected")
@@ -353,105 +348,101 @@ class VideoPlayerWidget(QWidget):
         self.ws_client = WebSocketClient(self.backend_url, self.video_id)
         
         # Connect signals
-        self.ws_client.bbox_received.connect(self.handle_bbox_update)
-        self.ws_client.stream_info_received.connect(self.handle_stream_info)
-        self.ws_client.connection_status.connect(self.handle_ws_status)
-        self.ws_client.error_occurred.connect(self.handle_ws_error)
+        self.ws_client.bbox_received.connect(self.on_bbox_received)
+        self.ws_client.stream_info_received.connect(self.on_stream_info_received)
+        self.ws_client.connection_status.connect(self.on_ws_status)
+        self.ws_client.error_occurred.connect(self.on_ws_error)
         
         # Start connection
         self.ws_client.connect()
         
-        # Setup ping timer to keep connection alive
+        # Setup ping timer (every 15 seconds)
         self.ping_timer = QTimer()
-        self.ping_timer.timeout.connect(self.send_ws_ping)
-        self.ping_timer.start(30000)  # Ping every 30 seconds
+        self.ping_timer.timeout.connect(lambda: self.ws_client.send_ping())
+        self.ping_timer.start(15000)
     
-    def handle_bbox_update(self, data: dict):
-        """Handle incoming bbox data from WebSocket"""
-        pts = data.get('pts')
+    def on_bbox_received(self, data: dict):
+        """Handle real-time bbox update from WebSocket"""
         bboxes = data.get('bboxes', [])
         
-        if pts is not None:
-            # Store in cache
-            self.bbox_cache[pts] = bboxes
-            
-            # Clean old cache entries
-            self._clean_bbox_cache()
+        for bbox in bboxes:
+            pts_raw = bbox.get('pts')
+            if pts_raw is not None:
+                if pts_raw not in self.bbox_cache:
+                    self.bbox_cache[pts_raw] = []
+                self.bbox_cache[pts_raw].append(bbox)
+        
+        # Clean old entries
+        self.cleanup_bbox_cache()
     
-    def handle_stream_info(self, data: dict):
+    def on_stream_info_received(self, data: dict):
         """Handle stream info from WebSocket"""
-        print(f"[WebSocket] Received stream info: {data}")
+        print(f"[WebSocket] Stream info: {data}")
     
-    def handle_ws_status(self, connected: bool, message: str):
-        """Handle WebSocket connection status"""
+    def on_ws_status(self, connected: bool, message: str):
+        """Update WebSocket status"""
         self.ws_connected = connected
         if connected:
             self.ws_status.setText("🟢 WS: Connected")
             self.ws_status.setStyleSheet("color: green; font-weight: bold;")
         else:
-            self.ws_status.setText("🔴 WS: Disconnected")
+            self.ws_status.setText(f"🔴 WS: {message}")
             self.ws_status.setStyleSheet("color: red; font-weight: bold;")
     
-    def handle_ws_error(self, error: str):
-        """Handle WebSocket errors"""
-        print(f"[WebSocket] Error: {error}")
+    def on_ws_error(self, error_msg: str):
+        """Handle WebSocket error"""
+        print(f"[WebSocket] Error: {error_msg}")
     
-    def send_ws_ping(self):
-        """Send ping to keep WebSocket alive"""
-        if self.ws_client:
-            self.ws_client.send_ping()
-    
-    def _clean_bbox_cache(self):
+    def cleanup_bbox_cache(self):
         """Remove old bboxes from cache"""
-        if not self.current_pts_raw:
+        if not self.bbox_cache:
             return
         
-        cutoff_pts = self.current_pts_raw - int((self.bbox_cache_max_age_seconds / self.time_base))
-        old_size = len(self.bbox_cache)
-        self.bbox_cache = {k: v for k, v in self.bbox_cache.items() if k > cutoff_pts}
+        current_pts = self.current_pts_raw
+        age_threshold_pts = int(self.bbox_cache_max_age_seconds / self.time_base)
         
-        removed = old_size - len(self.bbox_cache)
-        if removed > 50:
-            print(f"[BBox Cache] Cleaned {removed} entries, kept {len(self.bbox_cache)}")
+        to_remove = []
+        for pts in self.bbox_cache.keys():
+            if abs(pts - current_pts) > age_threshold_pts:
+                to_remove.append(pts)
+        
+        for pts in to_remove:
+            del self.bbox_cache[pts]
     
     def start_stream(self):
-        """Start video stream"""
+        """Start video stream thread"""
         self.stream_thread = VideoStreamThread(self.stream_url)
-        self.stream_thread.frame_ready.connect(self.buffer_frame)
-        self.stream_thread.stream_info.connect(self.lock_stream_fps)
-        self.stream_thread.error.connect(self.handle_stream_error)
+        self.stream_thread.frame_ready.connect(self.on_frame_ready)
+        self.stream_thread.stream_info.connect(self.on_stream_info)
+        self.stream_thread.error.connect(self.on_stream_error)
         self.stream_thread.start()
-    
-    def lock_stream_fps(self, fps: float):
-        """Lock FPS from stream metadata"""
-        if self.fps_locked:
-            return
         
-        self.stream_fps = fps
-        self.fps_locked = True
-        print(f"[VideoPlayer] FPS locked to {self.stream_fps:.2f}")
-        
-        self._update_replay_buffer_size()
-        
-        display_interval_ms = int(1000.0 / self.stream_fps)
+        # Start buffered display timer
         self.display_timer = QTimer()
         self.display_timer.timeout.connect(self.display_buffered_frame)
-        self.display_timer.start(display_interval_ms)
+        self.display_timer.start(16)
     
-    def buffer_frame(self, frame, frame_number, pts_raw, time_base):
-        """Add frame to buffer"""
-        arrival_time = time.time() * 1000
+    def on_stream_info(self, fps: float):
+        """Handle stream info"""
+        if not self.fps_locked:
+            self.stream_fps = fps
+            self.fps_locked = True
+            self._update_replay_buffer_size()
+            print(f"[VideoPlayer] Stream FPS locked: {fps:.2f}")
+    
+    def on_frame_ready(self, frame, frame_number: int, pts_raw: int, time_base: float):
+        """Handle new frame"""
         self.time_base = time_base
         
+        # Add to buffer with timestamp
         self.frame_buffer.append({
             'frame': frame,
-            'frame_number': frame_number,
             'pts_raw': pts_raw,
-            'arrival_time': arrival_time
+            'arrival_time': time.time() * 1000
         })
     
-    def handle_stream_error(self, error_msg):
-        """Handle stream errors"""
+    def on_stream_error(self, error_msg: str):
+        """Handle stream error"""
         print(f"[VideoPlayer] Stream error: {error_msg}")
         self.info_label.setText(f"Video ID: {self.video_id} | Error: {error_msg}")
     
@@ -638,11 +629,6 @@ class VideoPlayerWidget(QWidget):
             QMessageBox.information(self, "Replay Saved", message)
         else:
             QMessageBox.critical(self, "Save Error", message)
-    
-    def toggle_bboxes(self, checked):
-        """Toggle bbox visibility"""
-        self.bbox_overlay.toggle_visibility(not checked)
-        self.bbox_toggle.setText("Show BBoxes" if checked else "Hide BBoxes")
     
     def stop_watching(self):
         """Stop watching stream"""

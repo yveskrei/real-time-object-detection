@@ -8,7 +8,3 @@ The entire processing is done in a dedicated client written in **Rust**, to mini
 The following architecture takes place:<br>
 
 <img src="client-triton/assets/architecture.png" alt="Architecture" width="700"/>
-
-## DeepStream Client
-The [`client-deepstream`](client-deepstream) includes a POC implementation based on **NVIDIA's DeepStream**.<br>
-Due to DeepStream's approach of being more of a complete system for real time inference, and the fact that it requires us to write code that is mainly based around the DeepSeek SDK, made be abandon this path, with the idea that a more general purpose and flexible system is suitable for this task.
