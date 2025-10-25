@@ -5,3 +5,4 @@ onnx==1.18.0
 onnxconverter-common==1.15.0
 onnxruntime-gpu==1.22.0
 onnxoptimizer==0.3.13
+onnxscript==0.5.4

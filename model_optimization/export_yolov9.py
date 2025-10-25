@@ -1,55 +1,20 @@
 import argparse
 import torch
 import torch.onnx
+from pathlib import Path
 from onnxconverter_common import float16
 import onnx
 import onnxoptimizer
 import os
-from enum import Enum
-import sys
 
-# Model types
-class ModelType(Enum):
-    YOLOV9 = 'YOLOV9'
-    DINOV3 = 'DINOV3'
+class YOLOV9Wraper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
 
-def get_yolov9_model(model_path: str, source_code_path: str):
-    class YOLOV9Wrapper(torch.nn.Module):
-        def __init__(self, model):
-            super().__init__()
-            self.model = model
-
-        def forward(self, x):
-            output = self.model(x)
-            return output[0][0]
-
-    # Append YOLOV9 source code to python path
-    sys.path.insert(0, source_code_path)
-
-    # Load model
-    model_base = torch.load(model_path, weights_only=False)
-    model = model_base['model'].float().eval()
-    model = YOLOV9Wrapper(model)
-
-    # Define dummy input
-    dummy_input = torch.randn(1, 3, 640, 640)
-
-    return (model, dummy_input)
-
-def get_dinov3_model(model_path: str, dino_type: str, source_code_path: str):
-    # Load model
-    model_base = torch.hub.load(
-        source_code_path, 
-        dino_type, 
-        source='local', 
-        weights=model_path
-    )
-    model = model_base.eval()
-
-    # Define dummy input
-    dummy_input = torch.randn(1, 3, 224, 224)
-
-    return (model, dummy_input)
+    def forward(self, x):
+        output = self.model(x)
+        return output[0][0]
 
 def remove_training_nodes(model):
     """Remove training-specific nodes and convert to inference mode"""
@@ -183,22 +148,25 @@ def clean_unused_weights(model):
     
     return model
 
-def export_model(
-    model: torch.nn.Module, 
-    dummy_input: torch.Tensor, 
-    output_path: str, 
-    input_name: str = "images", 
-    output_name: str = "output"
-) -> str:
+def export_model(model_path: str, output_path: str, input_name: str = "images", output_name: str = "output", device: str = "cuda") -> str:
     """
     Exports PT model to onnx, both FP32 and highly optimized FP16 versions
     """
+    # Load model
+    model_base = torch.load(model_path, map_location=device, weights_only=False)
+    model = model_base['model'].float().to(device).eval()
+    model = YOLOV9Wrapper(model).to(device)
+
+    # Dummy input
+    dummy_input = torch.randn(1, 3, 640, 640).to(device)
+
     # Create output directory if doesn't exist
     os.makedirs(output_path, exist_ok=True)
 
     # Define output paths
-    path_fp32 = os.path.join(output_path, f"optimized-fp32.onnx")
-    path_fp16 = os.path.join(output_path, f"optimized-fp16.onnx")
+    model_name = Path(model_path).stem
+    path_fp32 = os.path.join(output_path, f"{model_name}-fp32.onnx")
+    path_fp16 = os.path.join(output_path, f"{model_name}-fp16.onnx")
 
     # Export to ONNX - FP32 (baseline)
     print("Exporting FP32 baseline model...")
@@ -273,50 +241,23 @@ def export_model(
     print("✓ Constant folding and identity elimination")
 
 def main():
-    parser = argparse.ArgumentParser(description='Export model to ONNX with advanced optimizations.')
-    parser.add_argument('--model-path', type=str, required=True, help='Path to the .pt PyTorch model/weights')
-    parser.add_argument('--model-type', type=str, required=True, choices=[x.value for x in ModelType], help='Type of model architecture')
-    parser.add_argument('--model-source-code', type=str, required=True, help="Path to the source code for the pt dependencies")
-    parser.add_argument('--dino-type', type=str, help="Type of DINOV3 model (e.g. dinov3_vits16)")
-
+    parser = argparse.ArgumentParser(description='Export YOLOv9 model to ONNX with advanced optimizations.')
+    parser.add_argument('--model-path', type=str, required=True, help='Path to the .pt PyTorch model')
     parser.add_argument('--output-path', type=str, default=os.getcwd(), help='Output directory for .onnx models')
     parser.add_argument('--input-name', type=str, default='images', help='Name of the ONNX model input')
     parser.add_argument('--output-name', type=str, default='output', help='Name of the ONNX model output')
     args = parser.parse_args()
 
-    # Get torch model instance
-    model_type = ModelType(args.model_type)
-    torch_model = None
-    dummy_input = None
-
-    if model_type == ModelType.YOLOV9:
-        torch_model, dummy_input = get_yolov9_model(
-            args.model_path,
-            args.model_source_code
-        )
-    elif model_type == ModelType.DINOV3:
-        torch_model, dummy_input = get_dinov3_model(
-            args.model_path,
-            args.dino_type,
-            args.model_source_code
-        )
-    
-    if torch_model is None or dummy_input is None:
-        raise Exception("Cannot process model architecture type!")
-    
-    # Export model to optimized ONNX
+    # Auto device detection
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[i] Using device: {device}")
 
-    torch_model = torch_model.to(device)
-    dummy_input = dummy_input.to(device)
-
     export_model(
-        torch_model,
-        dummy_input,
+        args.model_path,
         args.output_path,
         args.input_name, 
-        args.output_name
+        args.output_name, 
+        device
     )
 
 if __name__ == '__main__':
