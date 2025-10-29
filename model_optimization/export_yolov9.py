@@ -7,7 +7,7 @@ import onnx
 import onnxoptimizer
 import os
 
-class YOLOV9Wraper(torch.nn.Module):
+class YOLOV9Wrapper(torch.nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
