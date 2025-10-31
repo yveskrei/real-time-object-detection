@@ -30,9 +30,9 @@ pub struct ModelConfig {
     pub input_shape: Vec<i64>,
     pub output_name: String,
     pub output_shape: Vec<i64>,
-    pub batch_max_size: usize,
-    pub batch_max_queue_delay: usize,
-    pub batch_preferred_sizes: Vec<usize>
+    pub batch_max_size: u32,
+    pub batch_max_queue_delay: u32,
+    pub batch_preferred_sizes: Vec<u32>
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -47,14 +47,14 @@ pub struct SourcesConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SourceConfig {
-    pub inf_frame: usize,
+    pub inf_frame: u32,
     pub conf_threshold: f32,
     pub nms_iou_threshold: f32
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SourceConfigOptional {
-    pub inf_frame: Option<usize>,
+    pub inf_frame: Option<u32>,
     pub conf_threshold: Option<f32>,
     pub nms_iou_threshold: Option<f32>
 }
@@ -98,7 +98,16 @@ impl InferencePrecision {
 #[derive(PartialEq, Eq, Hash, Clone, Debug, Deserialize)]
 pub enum InferenceModelType {
     YOLO,
-    DINO
+    DINO,
+}
+
+impl InferenceModelType {
+    pub fn to_string(&self) -> &'static str {
+        match self {
+            InferenceModelType::YOLO => "YOLO",
+            InferenceModelType::DINO => "DINO",
+        }
+    }
 }
 
 /// Represents type of inference model

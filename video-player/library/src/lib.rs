@@ -109,6 +109,7 @@ pub extern "C" fn InitMultipleSources(source_ids: *const c_int, size: c_int, log
 }
 
 #[unsafe(no_mangle)]
+#[allow(unused_variables)]
 pub extern "C" fn PostResults(source_id: c_int, result_json: *const c_char) -> c_int {
     if result_json.is_null() {
         log_error!("PostResults: null JSON pointer");
@@ -124,8 +125,6 @@ pub extern "C" fn PostResults(source_id: c_int, result_json: *const c_char) -> c
             }
         }
     };
-
-    log_info!("PostResults called for source {}", source_id);
     
     // Spawn async task to post results
     TOKIO_RUNTIME.spawn(async move {
@@ -163,9 +162,6 @@ async fn post_results_async(json_str: String) -> anyhow::Result<()> {
         let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
         anyhow::bail!("Backend rejected bboxes (status {}): {}", status, error_text);
     }
-
-    let response_text = response.text().await?;
-    log_info!("PostResults: Backend response: {}", response_text);
     
     Ok(())
 }

@@ -1,82 +1,45 @@
 import argparse
 import torch
-import torch.nn as nn
 import torch.onnx
 from pathlib import Path
 import os
 import onnx
 
-class DINOV3Wrapper(nn.Module):
-    """Wrapper to extract CLS token from DINOv3 model output"""
-    
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-    
-    def forward(self, x):
-        output = self.model(x)
-        # Extract CLS token (first token in sequence)
-        return output[:, 0]
+# Custom modules
+from export_utils import ModelType, get_dinov3_model, get_yolov9_model
 
 def export_model(
-    model_path: str,
-    model_source_code: str,
-    dino_type: str,
+    model_name: str,
+    model: torch.nn.Module,
+    dummy_input: torch.Tensor,
     output_path: str,
     input_name: str = "images",
     output_name: str = "output"
 ) -> str:
     """
-    Exports DINOv3 model to ONNX, both FP32 and highly optimized FP16 versions
+    Exports a given model to ONNX format with both FP32 and FP16 versions.
     """
-    print(f"Loading DINOv3 model: {dino_type}")
-    print(f"Model weights: {model_path}")
-    print(f"Source code path: {model_source_code}")
+    print(f"Exporting model: {model_name}")
 
-    # Auto device detection
+    # Send model to device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"[i] Using device: {device}")
-
-    # Load model using torch.hub
-    model_base = torch.hub.load(
-        model_source_code,
-        dino_type,
-        source='local',
-        pretrained=False  # We'll load weights manually
-    )
-
-    # Load weights seperately
-    state_dict = torch.load(
-        model_path, 
-        map_location=device, 
-        weights_only=True
-    )
-    model_base.load_state_dict(state_dict)
-    
-    # Wrap model to extract CLS token and set to eval mode
-    model = DINOV3Wrapper(model_base).to(device)
-    model = model.eval()
-    
-    # Dummy input (DINOv3 typically uses 224x224)
-    dummy_input = torch.randn(1, 3, 224, 224).to(device)
-    
-    # Create output directory if doesn't exist
-    os.makedirs(output_path, exist_ok=True)
+    model = model.to(device)
+    dummy_input = dummy_input.to(device)
+    print(f"Using device: {device}")
     
     # Define output paths
-    model_name = Path(model_path).stem if model_path else dino_type
     path_fp32 = os.path.join(output_path, f"{model_name}-fp32.onnx")
     path_fp16 = os.path.join(output_path, f"{model_name}-fp16.onnx")
     
     # Export to ONNX - FP32 (baseline)
-    print("\nExporting FP32 baseline model...")
+    print("Exporting FP32 baseline model...")
     torch.onnx.export(
-        model,
-        dummy_input,
+        model.float(),
+        dummy_input.float(),
         path_fp32,
         input_names=[input_name],
         output_names=[output_name],
-        opset_version=14,
+        opset_version=18,
         do_constant_folding=True,
         dynamic_axes={
             input_name: {0: 'batch_size'},
@@ -86,9 +49,9 @@ def export_model(
         keep_initializers_as_inputs=False,
         dynamo=False
     )
-    print("✓ FP32 export successful")
+    print("FP32 export successful")
     
-    # Step 4: Convert to FP16 (this should be done AFTER other optimizations)
+    # Convert to FP16
     print("Converting to FP16 precision...")
     torch.onnx.export(
         model.half(),
@@ -96,7 +59,7 @@ def export_model(
         path_fp16,
         input_names=[input_name],
         output_names=[output_name],
-        opset_version=14,
+        opset_version=18,
         do_constant_folding=True,
         dynamic_axes={
             input_name: {0: 'batch_size'},
@@ -106,9 +69,16 @@ def export_model(
         keep_initializers_as_inputs=False,
         dynamo=False
     )
-    print("✓ FP16 conversion successful")
+    print("FP16 conversion successful")
     
-    # Step 7: Validate and save
+    # Validate and save
+    try:
+        model_fp32 = onnx.load(path_fp32)
+        onnx.checker.check_model(model_fp32)
+        print("FP32 Model validation: PASSED")
+    except Exception as e:
+        print(f"Model validation warning: {e}")
+    
     try:
         model_fp16 = onnx.load(path_fp16)
         onnx.checker.check_model(model_fp16)
@@ -125,10 +95,16 @@ def export_model(
     print(f"Exported optimized FP16 model to: {path_fp16}")
     print(f"Size reduction: {original_size:.1f} MB → {optimized_size:.1f} MB ({size_reduction:.1f}% smaller)")
 
-
 def main():
     parser = argparse.ArgumentParser(
-        description='Export DINOv3 model to ONNX with RoPE TensorRT patch and advanced optimizations.'
+        description='Export models to ONNX FP32 and FP16 formats'
+    )
+    parser.add_argument(
+        '--model-type',
+        type=str,
+        required=True,
+        choices=ModelType._member_names_,
+        help='Type of model to export (e.g. YOLOV9, DINOv3)'
     )
     parser.add_argument(
         '--model-path',
@@ -145,7 +121,6 @@ def main():
     parser.add_argument(
         '--dino-type',
         type=str,
-        required=True,
         help='DINOv3 model type (e.g., dinov3_vitb16, dinov3_vits14, dinov3_vitl14)'
     )
     parser.add_argument(
@@ -168,11 +143,37 @@ def main():
     )
     
     args = parser.parse_args()
+
+    # Load model to context
+    model_type = ModelType[args.model_type]
+    model = None
+    dummy_input = None
+
+    if model_type == ModelType.DINOV3:
+        if not args.dino_type:
+            raise ValueError("DINOv3 model type must be specified with --dino-type")
+        
+        model, dummy_input = get_dinov3_model(
+            args.model_source_code,
+            args.model_path,
+            args.dino_type
+        )
+    elif model_type == ModelType.YOLOV9:
+        model, dummy_input = get_yolov9_model(
+            args.model_source_code,
+            args.model_path
+        )
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
     
+    if model is None or dummy_input is None:
+        raise Exception('Failed to load model or dummy input')
+    
+    # Export model
     export_model(
-        args.model_path,
-        args.model_source_code,
-        args.dino_type,
+        Path(args.model_path).stem,
+        model,
+        dummy_input,
         args.output_path,
         args.input_name,
         args.output_name

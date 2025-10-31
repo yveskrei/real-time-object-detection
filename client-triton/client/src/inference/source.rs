@@ -71,6 +71,30 @@ pub struct FrameProcessStats {
     pub processing: u64
 }
 
+impl Default for FrameProcessStats {
+    fn default() -> Self {
+        Self {
+            queue: 0,
+            pre_processing: 0,
+            inference: 0,
+            post_processing: 0,
+            results: 0,
+            processing: 0
+        }
+    }
+}
+
+impl FrameProcessStats {
+    pub fn accumulate(&mut self, other: &Self) {
+        self.queue += other.queue;
+        self.pre_processing += other.pre_processing;
+        self.inference += other.inference;
+        self.post_processing += other.post_processing;
+        self.results += other.results;
+        self.processing += other.processing;
+    }
+}
+
 pub struct SourceStats {
     pub frames_total: AtomicU64,
     pub frames_expected: AtomicU64,
@@ -113,7 +137,7 @@ impl SourceStats {
         self.total_processing_time.store(0, Ordering::Relaxed);
     }
 
-    pub fn add_stats(&self, stats: &FrameProcessStats) {
+    pub fn accumulate(&self, stats: &FrameProcessStats) {
         self.total_queue_time.fetch_add(stats.queue, Ordering::Relaxed);
         self.total_pre_proc_time.fetch_add(stats.pre_processing, Ordering::Relaxed);
         self.total_inference_time.fetch_add(stats.inference, Ordering::Relaxed);
@@ -217,7 +241,7 @@ impl SourceProcessor {
                                             process_source_stats.frames_success.fetch_add(1, Ordering::Relaxed);
 
                                             // Add inference statistics to counters
-                                            process_source_stats.add_stats(&stats);
+                                            process_source_stats.accumulate(&stats);
                                         },
                                         Err(_) => {
                                             process_source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
@@ -297,7 +321,7 @@ impl SourceProcessor {
     }
 
     /// Sends inference requests to a seperate thread pool
-    pub fn process_frame(&self, raw_frame: Vec<u8>, height: usize, width: usize, pts: u64) {
+    pub fn process_frame(&self, raw_frame: Vec<u8>, height: u32, width: u32, pts: u64) {
         let frames_total = self.source_stats.frames_total.load(Ordering::Relaxed);
 
         // Send inference results on every N frame
@@ -340,23 +364,83 @@ impl SourceProcessor {
         // Perform inference on raw frame and populate results
         let stats = match inference_task {
             InferenceTask::ObjectDetection => {
-                let inference_model = inference::get_inference_model(InferenceModelType::YOLO)?;
-
-                processing::yolo::process_frame(
-                    &inference_model,
-                    source_id,
+                // Get BBOXes for frame
+                let bboxes_model = inference::get_inference_model(InferenceModelType::YOLO)?;
+                let bboxes_frame = Arc::clone(&frame);
+                let (mut bboxes_stats, bboxes) = processing::yolo::process_frame(
+                    &bboxes_model,
                     &source_config,
-                    frame
-                ).await?
+                    bboxes_frame
+                ).await?;
+
+                // Populate BBOXes if we have any
+                if bboxes.len() > 0 {
+                    let measure_start = Instant::now();
+
+                    // Populate BBOXes to third party services
+                    let results_source_id = Arc::clone(&source_id);
+                    let results_frame = Arc::clone(&frame);
+                    let results_arc = Arc::new(bboxes);
+                    SourceProcessor::populate_bboxes(
+                        results_source_id, 
+                        results_frame, 
+                        results_arc
+                    ).await;
+
+                    // Update results time
+                    let results_time = measure_start.elapsed();
+                    bboxes_stats.results += results_time.as_micros() as u64;
+                }
+
+                bboxes_stats
             },
             InferenceTask::Embedding => {
-                let inference_model = inference::get_inference_model(InferenceModelType::DINO)?;
+                // Get BBOXes for frame
+                let bboxes_model = inference::get_inference_model(InferenceModelType::YOLO)?;
+                let bboxes_frame = Arc::clone(&frame);
+                let (bboxes_stats, bboxes) = processing::yolo::process_frame(
+                    &bboxes_model,
+                    &source_config,
+                    bboxes_frame
+                ).await?;
+                let bboxes = Arc::new(bboxes);
 
-                processing::dino::process_frame(
-                    &inference_model,
-                    &source_id,
-                    &frame
-                ).await?
+                // Get embeddings for frame and bboxes
+                let embedding_model = inference::get_inference_model(InferenceModelType::DINO)?;
+                let embedding_bboxes = Arc::clone(&bboxes);
+                let embedding_frame = Arc::clone(&frame);
+                let (mut embedding_stats, embeddings) = processing::dino::process_frame(
+                    &embedding_model,
+                    embedding_frame,
+                    embedding_bboxes
+                ).await?;
+                let embeddings = Arc::new(embeddings);
+
+                // Populate embeddings if we have any
+                if embeddings.len() > 0 {
+                    let measure_start = Instant::now();
+
+                    // Populate embeddings to third party services
+                    let results_source_id = Arc::clone(&source_id);
+                    let results_frame = Arc::clone(&frame);
+                    let results_embeddings = Arc::clone(&embeddings);
+                    SourceProcessor::populate_embeddings(
+                        results_source_id, 
+                        results_frame, 
+                        results_embeddings
+                    ).await;
+
+                    // Update results time
+                    let results_time = measure_start.elapsed();
+                    embedding_stats.results += results_time.as_micros() as u64;
+                }
+
+                // Combine statistics
+                let mut final_stats = FrameProcessStats::default();
+                final_stats.accumulate(&bboxes_stats);
+                final_stats.accumulate(&embedding_stats);
+
+                final_stats
             }
             _ => anyhow::bail!("Model task is not supported for processing!")
         };
@@ -419,7 +503,7 @@ impl SourceProcessor {
     pub async fn populate_bboxes(
         source_id: Arc<String>, 
         frame: Arc<RawFrame>, 
-        bboxes: Vec<ResultBBOX>
+        bboxes: Arc<Vec<ResultBBOX>>
     ) {
         let bboxes = Arc::new(bboxes);
 
@@ -438,10 +522,9 @@ impl SourceProcessor {
             tracing::warn!(
                 source_id=&*source_id,
                 error=e.to_string(),
-                "Failed to populate bboxes to Kafka"
+                "Failed to populate bboxes to client video"
             );
         };
-
 
         // if let Err(e) = Kafka::populate_bboxes(
         //     source_id,
@@ -457,18 +540,27 @@ impl SourceProcessor {
     }
 
     /// Populates embedding to third party services
-    pub async fn populate_embedding(source_id: &str, frame: &RawFrame, embedding: ResultEmbedding) {
-        if let Err(e) = Kafka::populate_embedding(
-            source_id,
-            frame,
-            &embedding
-        ).await {
-            tracing::warn!(
-                source_id=source_id,
-                error=e.to_string(),
-                "Failed to populate embedding to Kafka"
-            );
-        };
+    #[allow(unused_variables)]
+    pub async fn populate_embeddings(
+        source_id: Arc<String>, 
+        frame: Arc<RawFrame>, 
+        embeddings: Arc<Vec<ResultEmbedding>>
+    ) {
+        tracing::warn!(
+            embeddings_len=embeddings.len(),
+            "got embeddings to populate"
+        )
+        // if let Err(e) = Kafka::populate_embedding(
+        //     source_id,
+        //     frame,
+        //     &embedding
+        // ).await {
+        //     tracing::warn!(
+        //         source_id=source_id,
+        //         error=e.to_string(),
+        //         "Failed to populate embedding to Kafka"
+        //     );
+        // };
     }
 }
 

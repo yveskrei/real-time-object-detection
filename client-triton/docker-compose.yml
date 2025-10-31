@@ -87,7 +87,7 @@ services:
 
   # ==================== TRITON SERVICES ====================
   triton_server:
-    image: nvcr.io/nvidia/tritonserver:23.08-py3
+    image: nvcr.io/nvidia/tritonserver:25.09-py3
     container_name: triton_server
     restart: unless-stopped
 

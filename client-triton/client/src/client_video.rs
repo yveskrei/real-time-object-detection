@@ -16,21 +16,12 @@ use crate::processing::{RawFrame, ResultBBOX};
 pub static CLIENT_VIDEO: OnceCell<Arc<ClientVideo>> = OnceCell::new();
 
 pub fn get_client_video() -> Result<&'static Arc<ClientVideo>> {
-    CLIENT_VIDEO
-        .get()
-        .context("Error getting client video")
-}
-
-pub fn init_client_video() -> Result<()> {
-    // Create new instance
-    let client_video = ClientVideo::new()
-        .context("Error creating client video")?;
-
-    // Set global variable
-    CLIENT_VIDEO.set(Arc::new(client_video))
-        .map_err(|_| anyhow::anyhow!("Error setting client video"))?;
-
-    Ok(())
+    CLIENT_VIDEO.get_or_try_init(|| {
+        let client_video = ClientVideo::new()
+            .context("Error creating client video")?;
+        
+        Ok(Arc::new(client_video))
+    })
 }
 
 // C Types
@@ -75,6 +66,8 @@ impl ClientVideo {
         let library = unsafe {
             Library::new("secrets/libclient_video.so")?
         };
+
+        println!("NIGGA");
 
         Ok(
             Self {
@@ -205,8 +198,8 @@ impl ClientVideo {
         pts: c_ulonglong,
     ) {
         let source_id = source_id.to_string();
-        let width = width as usize;
-        let height = height as usize;
+        let width = width as u32;
+        let height = height as u32;
         let frame_size = (width * height * 3) as usize;
 
         match source::get_source_processor(&source_id) {

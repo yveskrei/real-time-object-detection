@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use anyhow::{self, Result, Context};
 use std::time::{Duration, Instant};
-use crate::utils::config::InferenceModelType;
 
 // Custom modules
 pub mod source;
@@ -24,10 +23,11 @@ use crate::utils::{
     GPUStats,
     config::{AppConfig, ModelConfig, TritonConfig}
 };
+use crate::utils::config::{InferenceModelType, InferencePrecision};
 
 // Variables
 pub static INFERENCE_MODELS: OnceCell<HashMap<InferenceModelType, Arc<InferenceModel>>> = OnceCell::const_new();
-pub static GPU_STATS_INTERVAL: Duration = Duration::from_secs(3);
+pub static GPU_STATS_INTERVAL: Duration = Duration::from_secs(200);
 
 /// Returns the inference model instance, if initiated
 pub fn get_inference_model(model_type: InferenceModelType) -> Result<&'static Arc<InferenceModel>> {
@@ -73,14 +73,10 @@ pub async fn init_inference_models(app_config: &AppConfig) -> Result<()> {
 pub async fn start_models_instances(app_config: &AppConfig) -> Result<()> {
     // Calculate total "load units" - how much processing capacity we need
     // Each source contributes fractional load based on its frame rate
-    let instances: usize = app_config
+    let instances: u32 = app_config
         .sources_config()
         .sources
-        .len();
-        // .values()
-        // .map(|source_config| 1.0 / source_config.inf_frame as f32)
-        // .sum::<f32>()
-        // .ceil() as usize;
+        .len() as u32;
 
     // Load same amount of instances for each model type
     for model_type in app_config.inference_config().models.keys() {
@@ -88,15 +84,15 @@ pub async fn start_models_instances(app_config: &AppConfig) -> Result<()> {
 
         // Clear previous model instances
         if let Ok(_) = client_instance.unload_model().await {
-            tracing::warn!("Unloaded previous model instances")
+            tracing::warn!("Unloaded previous model instances for type {}", model_type.to_string());
         }
 
         // Initiate model instances
         client_instance.load_model(instances).await
             .context("Error loading model instances")?;
+
+        tracing::info!("Initiated {} model instances for type {}", instances, model_type.to_string());
     }
-    
-    tracing::info!("Initiated {} model instances for each model type", instances);
 
     Ok(())
 }
@@ -217,7 +213,7 @@ impl InferenceModel {
     }
     
     /// Loads given amount of instances of a given model
-    pub async fn load_model(&self, instances: usize) -> Result<()> {
+    pub async fn load_model(&self, instances: u32) -> Result<()> {
         let model_config = json!({
             "name": &self.model_config().name,
             "platform": "tensorrt_plan",
@@ -245,7 +241,8 @@ impl InferenceModel {
             ],
             "dynamic_batching": {
                 "max_queue_delay_microseconds": self.model_config().batch_max_queue_delay,
-                "preferred_batch_size": &self.model_config().batch_preferred_sizes
+                "preferred_batch_size": &self.model_config().batch_preferred_sizes,
+                "preserve_ordering": false
             },
             "optimization": {
                 "execution_accelerators": {
@@ -303,9 +300,8 @@ impl InferenceModel {
         Ok(())
     }
 
-    /// Performs inference on a raw input, returning raw model results
-    pub async fn infer(&self, raw_input: Vec<u8>) -> Result<Vec<u8>> {        
-        // tracing::info!("inference!");
+    /// Performs inference on a single raw input, returning raw model results
+    pub async fn infer_single(&self, raw_input: Vec<u8>) -> Result<Vec<u8>> {        
         // Create new inference request
         let mut inference_request = self.base_request.clone();
         inference_request.raw_input_contents.push(raw_input);
@@ -320,10 +316,60 @@ impl InferenceModel {
             inference_result.raw_output_contents
                 .into_iter()
                 .next()
-                .context("Error getting inference results for raw input")?
+                .context("Error getting inference result for input")?
         )
     }
 
+    /// Performs inference on many raw inputs, returning raw model results
+    /// Automatically batches requests up to max_batch_size
+    pub async fn infer_many(&self, raw_inputs: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>> {
+        let max_batch_size = self.model_config.batch_max_size as usize;
+        let mut all_results = Vec::with_capacity(raw_inputs.len());
+        
+        // Calculate output size per sample
+        let output_size_per_sample: usize = self.model_config.output_shape
+            .iter()
+            .map(|&dim| dim as usize)
+            .product::<usize>() * match self.model_config.precision {
+                InferencePrecision::FP16 => 2,
+                InferencePrecision::FP32 => 4,
+            };
+        
+        for chunk in raw_inputs.chunks(max_batch_size) {
+            let batch_size = chunk.len();
+            
+            // Concatenate batch into single blob
+            let total_bytes = chunk.iter().map(|v| v.len()).sum();
+            let mut concatenated = Vec::with_capacity(total_bytes);
+            for input in chunk {
+                concatenated.extend_from_slice(input);
+            }
+            
+            // Create inference request
+            let mut inference_request = self.base_request.clone();
+            inference_request.inputs[0].shape = {
+                let mut shape = vec![batch_size as i64];
+                shape.extend(&self.model_config.input_shape);
+                shape
+            };
+            inference_request.raw_input_contents = vec![concatenated];
+
+            // Perform inference
+            let inference_result = self.client.model_infer(inference_request)
+                .await
+                .context("Error sending triton inference request")?;
+            
+            // Split concatenated output back into individual results
+            let output_blob = &inference_result.raw_output_contents[0];
+            for i in 0..batch_size {
+                let start = i * output_size_per_sample;
+                let end = start + output_size_per_sample;
+                all_results.push(output_blob[start..end].to_vec());
+            }
+        }
+        
+        Ok(all_results)
+    }
     /// Get Triton Server alive status
     pub async fn is_alive(&self) -> bool {
         let server_alive = &self.client.server_live().await;

@@ -7,10 +7,43 @@ use crate::inference::{
     source::FrameProcessStats, 
     InferenceModel
 };
-use crate::processing::{self, RawFrame, ResultBBOX, preprocessing};
+use crate::processing::{self, RawFrame, ResultBBOX};
 use crate::utils::config::SourceConfig;
-use crate::inference::source::SourceProcessor;
 use crate::utils::config::InferencePrecision;
+
+/// Performs pre-processing on raw RGB frame for YOLO models
+/// 
+/// Performs the following steps of processing:
+/// 1. Resizes the given image to 640x640 while preserving aspect ratio.
+/// Applying letterbox padding to complete the missing pixels for certain aspect ratios.
+/// 2. Normalizes pixels from 0-255 to 0-1
+/// 3. Converting raw pixel values to required precision datatype
+/// 4. Outputs raw bytes ordered by color channels(Planar): \[RRRBBBGGG\]
+pub fn preprocess(
+    frame: &RawFrame,
+    precision: InferencePrecision,
+) -> Result<Vec<u8>> {
+    // Validate input
+    let frame_target_size = (frame.height * frame.width * 3) as usize;
+    if frame.data.len() != frame_target_size {
+        anyhow::bail!(
+            "Got unexpected size of frame input. Got {}, expected {}",
+            frame.data.len(),
+            frame_target_size
+        );
+    }
+
+    // Preprocess with letterbox resize + YOLO normalization
+    const TARGET_SIZE: u32 = 640;
+    processing::resize_letterbox_and_normalize(
+        &frame.data,
+        frame.height,
+        frame.width,
+        TARGET_SIZE,
+        TARGET_SIZE,
+        precision
+    )
+}
 
 /// Perform NMS reduction of bboxes
 #[inline(never)] // Don't inline to keep instruction cache hot for main loop
@@ -98,15 +131,15 @@ pub fn postprocess(
         );
     }
 
-    let target_features = output_shape[0] as usize;
-    let target_anchors = output_shape[1] as usize;
+    let target_features = output_shape[0] as u32;
+    let target_anchors = output_shape[1] as u32;
     let target_classes = target_features - 4;
     
     // Validate size of output data
     let expected_size = match precision {
         InferencePrecision::FP16 => target_anchors * target_features * 2,
         InferencePrecision::FP32 => target_anchors * target_features * 4,
-    };
+    } as usize;
     
     if results.len() != expected_size {
         anyhow::bail!(
@@ -120,8 +153,8 @@ pub fn postprocess(
     }
     
     // Precompute letterbox parameters
-    const TARGET_SIZE: usize = 640;
-    let letterbox = preprocessing::calculate_letterbox(
+    const TARGET_SIZE: u32 = 640;
+    let letterbox = processing::calculate_letterbox(
         original_frame.height, 
         original_frame.width, 
         TARGET_SIZE
@@ -146,10 +179,10 @@ pub fn postprocess(
             for anchor_idx in 0..target_anchors {
                 unsafe {
                     // Load all bbox values at once for better cache usage
-                    let x = processing::get_f16_to_f32_lut(*u16_data.get_unchecked(anchor_idx));
-                    let y = processing::get_f16_to_f32_lut(*u16_data.get_unchecked(stride1 + anchor_idx));
-                    let w = processing::get_f16_to_f32_lut(*u16_data.get_unchecked(stride2 + anchor_idx));
-                    let h = processing::get_f16_to_f32_lut(*u16_data.get_unchecked(stride3 + anchor_idx));
+                    let x = processing::get_f16_to_f32_lut(*u16_data.get_unchecked(anchor_idx as usize));
+                    let y = processing::get_f16_to_f32_lut(*u16_data.get_unchecked((stride1 + anchor_idx) as usize));
+                    let w = processing::get_f16_to_f32_lut(*u16_data.get_unchecked((stride2 + anchor_idx) as usize));
+                    let h = processing::get_f16_to_f32_lut(*u16_data.get_unchecked((stride3 + anchor_idx) as usize));
                     
                     // Fused bbox transformation
                     let half_w = w * 0.5;
@@ -160,13 +193,13 @@ pub fn postprocess(
                     let y2 = (y + half_h - letterbox.pad_y as f32) * letterbox.inv_scale;
                     
                     // Find max class with unrolled loop for common cases
-                    let mut max_score = 0.0f32;
-                    let mut max_class = 0usize;
+                    let mut max_score: f32 = 0.0;
+                    let mut max_class: u32 = 0;
                     
                     let class_base = stride4 + anchor_idx;
                     
                     for class_idx in 0..target_classes {
-                        let prob_idx = class_base + class_idx * stride1;
+                        let prob_idx = (class_base + class_idx * stride1) as usize;
                         let score = processing::get_f16_to_f32_lut(*u16_data.get_unchecked(prob_idx));
                         if score > max_score {
                             max_score = score;
@@ -201,10 +234,10 @@ pub fn postprocess(
             for anchor_idx in 0..target_anchors {
                 unsafe {
                     // Load bbox values
-                    let x = *f32_data.get_unchecked(anchor_idx);
-                    let y = *f32_data.get_unchecked(stride1 + anchor_idx);
-                    let w = *f32_data.get_unchecked(stride2 + anchor_idx);
-                    let h = *f32_data.get_unchecked(stride3 + anchor_idx);
+                    let x = *f32_data.get_unchecked(anchor_idx as usize);
+                    let y = *f32_data.get_unchecked((stride1 + anchor_idx) as usize);
+                    let w = *f32_data.get_unchecked((stride2 + anchor_idx) as usize);
+                    let h = *f32_data.get_unchecked((stride3 + anchor_idx) as usize);
                     
                     // Fused bbox transformation
                     let half_w = w * 0.5;
@@ -215,13 +248,13 @@ pub fn postprocess(
                     let y2 = (y + half_h - letterbox.pad_y as f32) * letterbox.inv_scale;
                     
                     // Find max class with unrolling
-                    let mut max_score = 0.0f32;
-                    let mut max_class = 0usize;
+                    let mut max_score: f32 = 0.0;
+                    let mut max_class: u32 = 0;
                     
                     let class_base = stride4 + anchor_idx;
                     
                     for class_idx in 0..target_classes {
-                        let prob_idx = class_base + class_idx * stride1;
+                        let prob_idx = (class_base + class_idx * stride1) as usize;
                         let score = *f32_data.get_unchecked(prob_idx);
                         if score > max_score {
                             max_score = score;
@@ -251,41 +284,12 @@ pub fn postprocess(
     Ok(detections)
 }
 
-/// Performs pre-processing on raw RGB frame for YOLO models
-/// 
-/// Performs the following steps of processing:
-/// 1. Resizes the given image to 640x640 while preserving aspect ratio.
-/// Applying letterbox padding to complete the missing pixels for certain aspect ratios.
-/// 2. Normalizes pixels from 0-255 to 0-1
-/// 3. Converting raw pixel values to required precision datatype
-/// 4. Outputs raw bytes ordered by color channels(Planar): \[RRRBBBGGG\]
-pub fn preprocess(
-    frame: &RawFrame,
-    precision: InferencePrecision,
-) -> Result<Vec<u8>> {
-    const TARGET_SIZE: usize = 640;
-
-    // Performs letterbox resize + pixel normalization
-    // Returns raw bytes in planar order
-    preprocessing::resize_letterbox_and_normalize(
-        &frame.data,
-        frame.height,
-        frame.width,
-        TARGET_SIZE,
-        TARGET_SIZE,
-        precision
-    )
-}
-
-
 /// Performs operations on a given frame, including pre/post processing, inference on the given frame
-/// and posting the results to third party services
 pub async fn process_frame(
     inference_model: &InferenceModel, 
-    source_id: Arc<String>,
     source_config: &SourceConfig,
     frame: Arc<RawFrame>
-) -> Result<FrameProcessStats> {
+) -> Result<(FrameProcessStats, Vec<ResultBBOX>)> {
     let queue_time = frame.added.elapsed();
     let inference_start = Instant::now();
 
@@ -297,7 +301,7 @@ pub async fn process_frame(
 
     // Get raw bboxes from inference
     let measure_start = Instant::now();
-    let raw_results = inference_model.infer(pre_frame).await
+    let raw_results = inference_model.infer_single(pre_frame).await
         .context("Error performing inference for YOLO")?;
     let inference_time = measure_start.elapsed();
 
@@ -314,27 +318,14 @@ pub async fn process_frame(
         .context("Error postprocessing BBOXes for YOLO")?;
     let post_proc_time = measure_start.elapsed();
 
-    // Populate results - Only if got bboxes as result from model
-    let measure_start = Instant::now();
-    if bboxes.len() > 0 {
-        SourceProcessor::populate_bboxes(
-            source_id, 
-            frame,
-            bboxes
-        ).await;
-    }
-    let results_time = measure_start.elapsed();
-
     // Create statistics object
     let processing_time = inference_start.elapsed() + queue_time;
-    let stats = FrameProcessStats {
-        queue: queue_time.as_micros() as u64,
-        pre_processing: pre_proc_time.as_micros() as u64, 
-        inference: inference_time.as_micros() as u64, 
-        post_processing: post_proc_time.as_micros() as u64, 
-        results: results_time.as_micros() as u64,
-        processing: processing_time.as_micros() as u64
-    };
+    let mut stats = FrameProcessStats::default();
+    stats.queue = queue_time.as_micros() as u64;
+    stats.pre_processing = pre_proc_time.as_micros() as u64;
+    stats.inference = inference_time.as_micros() as u64;
+    stats.post_processing = post_proc_time.as_micros() as u64;
+    stats.processing = processing_time.as_micros() as u64;
 
-    Ok(stats)
+    Ok((stats, bboxes))
 }
