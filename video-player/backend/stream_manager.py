@@ -73,19 +73,31 @@ class StreamManager:
             # RTP has native multicast support
             cmd.extend([
                 "-c:v", "libx264",
-                "-preset", "ultrafast",
+                "-preset", "veryfast",  # Better quality than ultrafast
                 "-tune", "zerolatency",
+                "-b:v", "2M",  # Set video bitrate for consistency
+                "-maxrate", "2M",
+                "-bufsize", "4M",  # Buffer size = 2x bitrate
+                "-g", "50",  # GOP size - keyframe every 50 frames
+                "-c:a", "aac",  # Explicit audio codec
+                "-b:a", "128k",  # Audio bitrate
                 "-f", "rtp",
-                f"rtp://{multicast_addr}:{port}?ttl=1"
+                f"rtp://{multicast_addr}:{port}?ttl=5"  # Increased TTL
             ])
         else:
             # For mpegts and other formats, use UDP with multicast
             cmd.extend([
                 "-c:v", "libx264",
-                "-preset", "ultrafast",
+                "-preset", "veryfast",  # Better quality than ultrafast
                 "-tune", "zerolatency",
+                "-b:v", "2M",  # Set video bitrate for consistency
+                "-maxrate", "2M",
+                "-bufsize", "4M",  # Buffer size = 2x bitrate
+                "-g", "50",  # GOP size - keyframe every 50 frames
+                "-c:a", "aac",  # Explicit audio codec
+                "-b:a", "128k",  # Audio bitrate
                 "-f", output_format,
-                f"udp://{multicast_addr}:{port}?pkt_size=1316&ttl=1"
+                f"udp://{multicast_addr}:{port}?pkt_size=1316&buffer_size=65535&fifo_size=1000000&ttl=5"
             ])
         
         try:

@@ -19,3 +19,4 @@ rdkafka = { version = "0.38.0", features = ["cmake-build"] }
 libloading = "0.8.9"
 libc = "0.2.177"
 serde_yaml = "0.9.34"
+futures = "0.3.31"

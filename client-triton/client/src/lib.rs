@@ -21,7 +21,7 @@ pub fn get_tokio_runtime() -> Result<&'static Handle> {
     )
 }
 
-pub async fn init_inference_model(handle: Handle) -> Result<()> {
+pub async fn init_tokio_runtime(handle: Handle) -> Result<()> {
     if let Ok(_) = get_tokio_runtime() {
         anyhow::bail!("Tokio runtime is already set")
     }

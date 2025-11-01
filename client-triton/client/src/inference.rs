@@ -99,7 +99,7 @@ pub async fn start_models_instances(app_config: &AppConfig) -> Result<()> {
 
 /// Represents an instance of an inference model
 pub struct InferenceModel {
-    client: Client,
+    client: Arc<Client>,
     triton_config: TritonConfig,
     model_config: ModelConfig,
     base_request: ModelInferRequest,
@@ -131,7 +131,7 @@ impl InferenceModel {
         }
 
         // Create base inference request
-        let mut batch_input_shape = vec![1];
+        let mut batch_input_shape = Vec::with_capacity(&model_config.input_shape.len() + 1);
         batch_input_shape.extend(&model_config.input_shape);
 
         let base_request = ModelInferRequest {
@@ -190,7 +190,7 @@ impl InferenceModel {
         });
 
         Ok(Self { 
-            client,
+            client: Arc::new(client),
             triton_config,
             model_config,
             base_request,
@@ -300,33 +300,13 @@ impl InferenceModel {
         Ok(())
     }
 
-    /// Performs inference on a single raw input, returning raw model results
-    pub async fn infer_single(&self, raw_input: Vec<u8>) -> Result<Vec<u8>> {        
-        // Create new inference request
-        let mut inference_request = self.base_request.clone();
-        inference_request.raw_input_contents.push(raw_input);
-
-        // Perform inference
-        let inference_result = self.client.model_infer(inference_request)
-            .await
-            .context("Error sending triton inference request")?;
-
-        // Return inference results
-        Ok(
-            inference_result.raw_output_contents
-                .into_iter()
-                .next()
-                .context("Error getting inference result for input")?
-        )
-    }
-
     /// Performs inference on many raw inputs, returning raw model results
-    /// Automatically batches requests up to max_batch_size
-    pub async fn infer_many(&self, raw_inputs: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>> {
+    /// Automatically batches requests up to max_batch_size and processes batches concurrently
+    pub async fn infer(&self, raw_inputs: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>> {
         let max_batch_size = self.model_config.batch_max_size as usize;
-        let mut all_results = Vec::with_capacity(raw_inputs.len());
+        let num_inputs = raw_inputs.len();
         
-        // Calculate output size per sample
+        // Calculate output size per sample once
         let output_size_per_sample: usize = self.model_config.output_shape
             .iter()
             .map(|&dim| dim as usize)
@@ -335,50 +315,78 @@ impl InferenceModel {
                 InferencePrecision::FP32 => 4,
             };
         
-        for chunk in raw_inputs.chunks(max_batch_size) {
-            let batch_size = chunk.len();
-            
-            // Concatenate batch into single blob
-            let total_bytes = chunk.iter().map(|v| v.len()).sum();
-            let mut concatenated = Vec::with_capacity(total_bytes);
-            for input in chunk {
-                concatenated.extend_from_slice(input);
-            }
-            
-            // Create inference request
-            let mut inference_request = self.base_request.clone();
-            inference_request.inputs[0].shape = {
-                let mut shape = vec![batch_size as i64];
-                shape.extend(&self.model_config.input_shape);
-                shape
-            };
-            inference_request.raw_input_contents = vec![concatenated];
-
-            // Perform inference
-            let inference_result = self.client.model_infer(inference_request)
-                .await
-                .context("Error sending triton inference request")?;
-            
-            // Split concatenated output back into individual results
-            let output_blob = &inference_result.raw_output_contents[0];
-            for i in 0..batch_size {
-                let start = i * output_size_per_sample;
-                let end = start + output_size_per_sample;
-                all_results.push(output_blob[start..end].to_vec());
+        // Pre-allocate result slots - direct placement, no sorting
+        let mut all_results: Vec<Vec<u8>> = Vec::with_capacity(num_inputs);
+        all_results.resize_with(num_inputs, Vec::new);
+        
+        // Process all batches concurrently (1 batch if num_inputs <= max_batch_size)
+        let tasks: Vec<_> = raw_inputs
+            .chunks(max_batch_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let batch_size = chunk.len();
+                let start_idx = chunk_idx * max_batch_size;
+                
+                // Concatenate batch for Triton
+                let total_bytes: usize = chunk.iter().map(|v| v.len()).sum();
+                let mut concatenated = Vec::with_capacity(total_bytes);
+                for input in chunk {
+                    concatenated.extend_from_slice(input);
+                }
+                
+                let mut inference_request = self.base_request.clone();
+                inference_request.inputs[0].shape.insert(0, batch_size as i64);
+                inference_request.raw_input_contents = vec![concatenated];
+                
+                let client = Arc::clone(&self.client);
+                let output_size = output_size_per_sample;
+                
+                tokio::spawn(async move {
+                    // Network I/O - async
+                    let inference_result = client.model_infer(inference_request)
+                        .await
+                        .context("Error sending triton inference request")?;
+                    
+                    // CPU work - blocking thread pool
+                    let output_blob = inference_result.raw_output_contents.into_iter().next()
+                        .context("No output from inference")?;
+                    
+                    let batch_results = tokio::task::spawn_blocking(move || {
+                        // Unsafe pointer slicing for blazing speed
+                        let ptr = output_blob.as_ptr();
+                        let mut results = Vec::with_capacity(batch_size);
+                        
+                        unsafe {
+                            for i in 0..batch_size {
+                                let offset = i * output_size;
+                                let slice = std::slice::from_raw_parts(ptr.add(offset), output_size);
+                                results.push(slice.to_vec());
+                            }
+                        }
+                        
+                        results
+                    })
+                    .await
+                    .context("Failed to split batch results")?;
+                    
+                    Ok::<(usize, Vec<Vec<u8>>), anyhow::Error>((start_idx, batch_results))
+                })
+            })
+            .collect();
+        
+        // Await all batches and place directly
+        let results = futures::future::try_join_all(tasks)
+            .await
+            .context("Error performing inference on all inputs")?;
+        
+        for result in results {
+            let (start_idx, batch) = result?;
+            for (i, output) in batch.into_iter().enumerate() {
+                all_results[start_idx + i] = output;
             }
         }
         
         Ok(all_results)
-    }
-    /// Get Triton Server alive status
-    pub async fn is_alive(&self) -> bool {
-        let server_alive = &self.client.server_live().await;
-        
-        match server_alive {
-            Ok(response) => return response.live,
-            Err(_) => return false
-
-        }
     }
 
     pub fn process_gpu_stats(stats: GPUStats) {

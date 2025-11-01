@@ -13,6 +13,7 @@ class BBoxOverlay(QWidget):
         self.bboxes: List[dict] = []
         self.show_bboxes = True
         self.min_confidence = 0.0  # Minimum confidence threshold
+        self.bbox_retention_frames = 1  # Number of frames to retain bbox (default 1)
         
         # Original video frame dimensions (from decoded frame)
         self.frame_width = 0
@@ -36,6 +37,11 @@ class BBoxOverlay(QWidget):
     def set_min_confidence(self, confidence: float):
         """Set minimum confidence threshold for displaying bboxes"""
         self.min_confidence = max(0.0, min(1.0, confidence))
+        self.update()
+    
+    def set_bbox_retention(self, frames: int):
+        """Set number of frames to retain bboxes"""
+        self.bbox_retention_frames = max(1, min(30, frames))
         self.update()
     
     def index_to_coords(self, index: int) -> tuple:

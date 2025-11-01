@@ -290,42 +290,59 @@ pub async fn process_frame(
     source_config: &SourceConfig,
     frame: Arc<RawFrame>
 ) -> Result<(FrameProcessStats, Vec<ResultBBOX>)> {
-    let queue_time = frame.added.elapsed();
-    let inference_start = Instant::now();
+    let processing_start = Instant::now();
 
-    // Pre process image
+    // Pre process
     let measure_start = Instant::now();
-    let pre_frame = preprocess(&frame, inference_model.model_config().precision)
+    let precision = inference_model.model_config().precision;
+    let frame_clone = Arc::clone(&frame);
+    let pre_frame = tokio::task::spawn_blocking(move || {
+        preprocess(&frame_clone, precision)
+    })
+        .await
+        .context("Preprocess task failed")?
         .context("Error preprocessing image for YOLO")?;
     let pre_proc_time = measure_start.elapsed();
 
-    // Get raw bboxes from inference
+    // Inference
     let measure_start = Instant::now();
-    let raw_results = inference_model.infer_single(pre_frame).await
+    let raw_results = inference_model.infer(vec![pre_frame])
+        .await
         .context("Error performing inference for YOLO")?;
     let inference_time = measure_start.elapsed();
 
-    // Process given bboxes
+    let raw_results = match raw_results.into_iter().next() {
+        Some(res) => res,
+        None => anyhow::bail!("No inference results returned for YOLO"),
+    };
+
+    // Post process
     let measure_start = Instant::now();
-    let bboxes = postprocess(
-        &raw_results, 
-        &frame,
-        &inference_model.model_config().output_shape,
-        inference_model.model_config().precision,
-        source_config.conf_threshold,
-        source_config.nms_iou_threshold
-    )
+    let post_output_shape = inference_model.model_config().output_shape.clone();
+    let post_conf_threshold = source_config.conf_threshold;
+    let post_nms_iou_threshold = source_config.nms_iou_threshold;
+    
+    let bboxes = tokio::task::spawn_blocking(move || {
+        postprocess(
+            &raw_results, 
+            &frame,
+            &post_output_shape,
+            precision,
+            post_conf_threshold,
+            post_nms_iou_threshold
+        )
+    })
+        .await
+        .context("Postprocess task failed")?
         .context("Error postprocessing BBOXes for YOLO")?;
     let post_proc_time = measure_start.elapsed();
 
-    // Create statistics object
-    let processing_time = inference_start.elapsed() + queue_time;
+    // Statistics
     let mut stats = FrameProcessStats::default();
-    stats.queue = queue_time.as_micros() as u64;
     stats.pre_processing = pre_proc_time.as_micros() as u64;
     stats.inference = inference_time.as_micros() as u64;
     stats.post_processing = post_proc_time.as_micros() as u64;
-    stats.processing = processing_time.as_micros() as u64;
+    stats.processing = processing_start.elapsed().as_micros() as u64;
 
     Ok((stats, bboxes))
 }

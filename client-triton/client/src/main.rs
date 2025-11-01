@@ -14,6 +14,10 @@ async fn main() -> Result<()> {
     let app_config = AppConfig::new()
         .context("Error loading config")?;
 
+    client::init_tokio_runtime(tokio::runtime::Handle::current())
+        .await
+        .context("Error initializing tokio runtime")?;
+
     // // Initiate Kafka producer
     // kafka::init_kafka_producer(&app_config)
     //     .await
@@ -30,13 +34,16 @@ async fn main() -> Result<()> {
 
     // Initiate sources processors
     source::init_source_processors(&app_config)
+        .await
         .context("Error initiating source processors")?;
 
     // Start receiving frames from sources
-    ClientVideo::set_callbacks().await
+    ClientVideo::set_callbacks()
+        .await
         .context("Error setting Client Video callbacks")?;
 
-    ClientVideo::init_sources(&app_config).await
+    ClientVideo::init_sources(&app_config)
+        .await
         .context("Error setting Client Video callbacks")?;
 
     Ok(())

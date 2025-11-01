@@ -6,8 +6,7 @@ use std::sync::atomic::{Ordering, AtomicU64};
 use std::collections::HashMap;
 use anyhow::{Result, Context};
 use tokio::time::{Duration, interval, Instant};
-use std::sync::{LazyLock, RwLock};
-use tokio::sync::{Semaphore};
+use tokio::sync::{RwLock, Semaphore, OnceCell};
 
 // Custom modules
 use crate::inference::{
@@ -20,23 +19,24 @@ use crate::utils::kafka::Kafka;
 use crate::client_video::ClientVideo;
 
 // Variables
-pub static PROCESSORS: LazyLock<RwLock<HashMap<String, Arc<SourceProcessor>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
-pub static MAX_QUEUE_FRAMES: usize = 5;
-pub static MAX_PARALLEL_FRAME_PROCESSING: usize = 5;
+pub static PROCESSORS: OnceCell<RwLock<HashMap<String, Arc<SourceProcessor>>>> = OnceCell::const_new();
+pub static MAX_QUEUE_FRAMES: usize = 15;
 pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Returns a source processor instance by given stream ID
-pub fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
+pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
     PROCESSORS
+        .get()
+        .context("Source processors not initiated")?
         .read()
-        .unwrap()
+        .await
         .get(stream_id)
         .cloned()
         .context("Error getting stream source processor")
 }
 
 /// Initiates source processors for given list of sources
-pub fn init_source_processors(app_config: &AppConfig) -> Result<()> {
+pub async fn init_source_processors(app_config: &AppConfig) -> Result<()> {
     let mut processors: HashMap<String, Arc<SourceProcessor>> = HashMap::new();
     
     for (source_id, source_config) in app_config.sources_config().sources.iter() {
@@ -55,8 +55,10 @@ pub fn init_source_processors(app_config: &AppConfig) -> Result<()> {
         );
     }
     
-    // Set to global variable
-    *PROCESSORS.write().unwrap() = processors;
+    // Initialize OnceCell if not already set, then write
+    let rwlock = PROCESSORS.get_or_init(|| async { RwLock::new(HashMap::new()) }).await;
+    let mut guard = rwlock.write().await;
+    *guard = processors;
     
     Ok(())
 }
@@ -197,7 +199,7 @@ impl SourceProcessor {
             queue_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
         };
         let source_queue = Arc::new(FixedSizeQueue::<Arc<RawFrame>>::new(MAX_QUEUE_FRAMES, Some(queue_drop_callback)));
-        let queue_semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_FRAME_PROCESSING));
+        let queue_semaphore = Arc::new(Semaphore::new(MAX_QUEUE_FRAMES));
         
         // Create a seperate task for handling frames - performing inference
         let process_queue_semaphore = Arc::clone(&queue_semaphore);
@@ -321,7 +323,7 @@ impl SourceProcessor {
     }
 
     /// Sends inference requests to a seperate thread pool
-    pub fn process_frame(&self, raw_frame: Vec<u8>, height: u32, width: u32, pts: u64) {
+    pub async fn process_frame(&self, raw_frame: Vec<u8>, height: u32, width: u32, pts: u64) {
         let frames_total = self.source_stats.frames_total.load(Ordering::Relaxed);
 
         // Send inference results on every N frame
@@ -338,15 +340,7 @@ impl SourceProcessor {
             );
 
             // Send new frame to queue
-            if let Err(e) = self.queue.sender.send_sync(frame) {
-                self.source_stats.frames_failed.fetch_add(1, Ordering::Relaxed);
-
-                tracing::error!(
-                    source_id=&*self.source_id,
-                    error=e.to_string(),
-                    "source frame queue is full"
-                )
-            }
+            self.queue.sender.send_async(frame).await;
         } else {
             // Add to statistics
             self.source_stats.frames_total.fetch_add(1, Ordering::Relaxed);
@@ -361,8 +355,10 @@ impl SourceProcessor {
         frame: Arc<RawFrame>, 
         inference_task: InferenceTask
     ) -> Result<FrameProcessStats> {
+        let frame_queue_time = frame.added.elapsed();
+        
         // Perform inference on raw frame and populate results
-        let stats = match inference_task {
+        let mut stats = match inference_task {
             InferenceTask::ObjectDetection => {
                 // Get BBOXes for frame
                 let bboxes_model = inference::get_inference_model(InferenceModelType::YOLO)?;
@@ -445,6 +441,9 @@ impl SourceProcessor {
             _ => anyhow::bail!("Model task is not supported for processing!")
         };
 
+        // Return statistics
+        stats.queue = frame_queue_time.as_micros() as u64;
+        stats.processing += frame_queue_time.as_micros() as u64;
         Ok(stats)
     }
 
@@ -546,10 +545,10 @@ impl SourceProcessor {
         frame: Arc<RawFrame>, 
         embeddings: Arc<Vec<ResultEmbedding>>
     ) {
-        tracing::warn!(
-            embeddings_len=embeddings.len(),
-            "got embeddings to populate"
-        )
+        // tracing::warn!(
+        //     embeddings_len=embeddings.len(),
+        //     "got embeddings to populate"
+        // )
         // if let Err(e) = Kafka::populate_embedding(
         //     source_id,
         //     frame,

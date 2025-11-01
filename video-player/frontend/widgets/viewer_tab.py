@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox,
-    QLabel, QScrollArea, QMessageBox, QGridLayout, QDoubleSpinBox
+    QLabel, QScrollArea, QMessageBox, QGridLayout, QDoubleSpinBox, QSpinBox
 )
 from PyQt6.QtCore import QTimer, Qt
 from widgets.video_player import VideoPlayerWidget
@@ -49,7 +49,7 @@ class ViewerTab(QWidget):
         # Spacer to push right-side controls to the right
         controls.addStretch()
         
-        # Right side - Confidence control and hide bboxes button
+        # Right side - Confidence control, retention control, and hide bboxes button
         controls.addWidget(QLabel("Min Confidence:"))
         
         self.confidence_spinner = QDoubleSpinBox()
@@ -65,6 +65,20 @@ class ViewerTab(QWidget):
         self.confidence_spinner.valueChanged.connect(self.on_confidence_changed)
         self.confidence_spinner.setToolTip("Set minimum confidence threshold for displaying bounding boxes")
         controls.addWidget(self.confidence_spinner)
+        
+        # BBOX Retention control
+        controls.addWidget(QLabel("BBOX Retention:"))
+        
+        self.retention_spinner = QSpinBox()
+        self.retention_spinner.setRange(1, 30)
+        self.retention_spinner.setSingleStep(1)
+        self.retention_spinner.setValue(1)
+        self.retention_spinner.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+        self.retention_spinner.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.retention_spinner.setFixedWidth(80)
+        self.retention_spinner.valueChanged.connect(self.on_retention_changed)
+        self.retention_spinner.setToolTip("Number of frames to retain bounding boxes on screen")
+        controls.addWidget(self.retention_spinner)
         
         self.hide_bboxes_btn = QPushButton("Hide BBoxes")
         self.hide_bboxes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -95,6 +109,12 @@ class ViewerTab(QWidget):
         for player in self.active_players.values():
             if hasattr(player, 'bbox_overlay'):
                 player.bbox_overlay.set_min_confidence(value)
+    
+    def on_retention_changed(self, value: int):
+        """Update bbox retention for all active players"""
+        for player in self.active_players.values():
+            if hasattr(player, 'bbox_overlay'):
+                player.bbox_overlay.set_bbox_retention(value)
     
     def toggle_all_bboxes(self, checked: bool):
         """Toggle bbox visibility for all active players"""
@@ -146,20 +166,23 @@ class ViewerTab(QWidget):
                 QMessageBox.critical(self, "Error", "Stream metadata missing! Restart the stream.")
                 return
             
-            # Create video player with WebSocket support
+            # Create video player with WebSocket support (LIVE MODE - NO DELAY)
             player = VideoPlayerWidget(
                 video_id,
                 stream_url,
                 stream_start_time,
                 self.backend_url,  # Pass backend URL for WebSocket
-                replay_duration_seconds=30.0,
-                buffer_delay_ms=200
+                replay_duration_seconds=30.0
             )
             player.closed.connect(self.remove_player)
             
             # Apply current confidence threshold to new player
             if hasattr(player, 'bbox_overlay'):
                 player.bbox_overlay.set_min_confidence(self.confidence_spinner.value())
+            
+            # Apply current bbox retention to new player
+            if hasattr(player, 'bbox_overlay'):
+                player.bbox_overlay.set_bbox_retention(self.retention_spinner.value())
             
             # Apply current bbox visibility state to new player
             if self.hide_bboxes_btn.isChecked():

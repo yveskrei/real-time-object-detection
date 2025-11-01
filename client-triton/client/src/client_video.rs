@@ -202,29 +202,39 @@ impl ClientVideo {
         let height = height as u32;
         let frame_size = (width * height * 3) as usize;
 
-        match source::get_source_processor(&source_id) {
-            Err(e) => {
-                tracing::error!(
-                    error=e.to_string(),
-                    source_id=source_id, 
-                    "Source processor is not available"
-                )
-            },
-            Ok(processor) => {
-                match ClientVideo::get_c_array(frame, frame_size) {
-                    Err(e) => {
-                        tracing::error!(
-                            error=e.to_string(),
-                            source_id=source_id, 
-                            "RGB Frame is invalid"
-                        )
-                    },
-                    Ok(rgb_frame) => {
-                        processor.process_frame(rgb_frame, height, width, pts);
+        // We spawn a task in our threadpool to not block the C callback
+        
+        if let Ok(rgb_frame) = ClientVideo::get_c_array(frame, frame_size) {
+            if let Ok(runtime) = crate::get_tokio_runtime() {
+                runtime.spawn(async move {
+                    match source::get_source_processor(&source_id).await {
+                        Err(e) => {
+                            tracing::error!(
+                                error=e.to_string(),
+                                source_id=source_id, 
+                                "Source processor is not available"
+                            )
+                        },
+                        Ok(processor) => {
+                            processor.process_frame(rgb_frame, height, width, pts).await;
+                        }
                     }
-                }
+                });
+            } else {
+                tracing::error!(
+                    source_id=source_id, 
+                    "Cannot process frame on application runtime"
+                );
             }
+        } else {
+            tracing::error!(
+                source_id=source_id, 
+                "RGB Frame is invalid"
+            );
+            return;
         }
+        
+
     }
     extern "C" fn _source_stopped_callback(source_id: c_int) {
         tracing::info!(

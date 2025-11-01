@@ -168,48 +168,54 @@ pub async fn process_frame(
     frame: Arc<RawFrame>,
     bboxes: Arc<Vec<ResultBBOX>>
 ) -> Result<(FrameProcessStats, Vec<ResultEmbedding>)> {
-    let queue_time = frame.added.elapsed();
-    let inference_start = Instant::now();
+    let processing_start = Instant::now();
 
-    // Pre process image and bboxes
-    // Preprocessing involves letterbox and not center crop 
-    // to prevent losing information at corners of frame/bboxes
+    // Pre process
     let measure_start = Instant::now();
-    let mut pre_inputs = Vec::with_capacity(bboxes.len() + 1);
+    let precision = inference_model.model_config().precision;
+    let frame_clone = Arc::clone(&frame);
+    let bboxes_clone = Arc::clone(&bboxes);
+    
+    let pre_inputs = tokio::task::spawn_blocking(move || {
+        let mut pre_inputs = Vec::with_capacity(bboxes_clone.len() + 1);
 
-    let pre_frame = preprocess(&frame, inference_model.model_config().precision)
-        .context("Error preprocessing image for DinoV3")?;
-    pre_inputs.push(pre_frame);
+        let pre_frame = preprocess(&frame_clone, precision)
+            .context("Error preprocessing image for DinoV3")?;
+        pre_inputs.push(pre_frame);
 
-    let pre_bboxes = preprocess_bboxes(&frame, &bboxes, inference_model.model_config().precision)
-        .context("Error preprocessing bboxes for DinoV3")?;
-    pre_inputs.extend(pre_bboxes);
-
+        let pre_bboxes = preprocess_bboxes(&frame_clone, &bboxes_clone, precision)
+            .context("Error preprocessing bboxes for DinoV3")?;
+        pre_inputs.extend(pre_bboxes);
+        
+        Ok::<_, anyhow::Error>(pre_inputs)
+    })
+        .await
+        .context("Preprocess task failed")??;
     let pre_proc_time = measure_start.elapsed();
 
-    // We perform embedding on both the whole frame and on each BBOX
-    // Allowing us to store more information about the frame content
-    // And not supressing small objects of interest
+    // Inference
     let measure_start = Instant::now();
-    let raw_results = inference_model.infer_many(pre_inputs)
+    let raw_results = inference_model.infer(pre_inputs)
         .await
         .context("Error performing inference for DinoV3")?;
     let inference_time = measure_start.elapsed();
 
-    // Parse raw embedding vectors
+    // Post process
     let measure_start = Instant::now();
-    let embeddings = postprocess(raw_results, inference_model.model_config().precision)
+    let embeddings = tokio::task::spawn_blocking(move || {
+        postprocess(raw_results, precision)
+    })
+        .await
+        .context("Postprocess task failed")?
         .context("Error postprocessing embedding vectors for DinoV3")?;
     let post_proc_time = measure_start.elapsed();
 
-    // Create statistics object
-    let processing_time = inference_start.elapsed() + queue_time;
+    // Statistics
     let mut stats = FrameProcessStats::default();
-    stats.queue = queue_time.as_micros() as u64;
     stats.pre_processing = pre_proc_time.as_micros() as u64;
     stats.inference = inference_time.as_micros() as u64;
     stats.post_processing = post_proc_time.as_micros() as u64;
-    stats.processing = processing_time.as_micros() as u64;
+    stats.processing = processing_start.elapsed().as_micros() as u64;
 
     Ok((stats, embeddings))
 }
