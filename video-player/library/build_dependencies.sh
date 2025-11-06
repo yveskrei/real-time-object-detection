@@ -7,6 +7,11 @@ DEPS_DIR="$PROJECT_ROOT/dependencies"
 FFMPEG_DIR="$DEPS_DIR/ffmpeg"
 FFMPEG_SRC="$FFMPEG_DIR/src"
 
+# Export paths to our self-built binaries and config files
+export PATH="$DEPS_DIR/bin:$PATH"
+export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig:$DEPS_DIR/lib64/pkgconfig:$DEPS_DIR/share/pkgconfig:$PKG_CONFIG_PATH"
+export ACLOCAL_PATH="$DEPS_DIR/share/aclocal:$ACLOCAL_PATH"
+
 if [ -d "$DEPS_DIR" ]; then
   echo "Removing existing dependencies..."
   rm -rf "$DEPS_DIR"
@@ -23,13 +28,50 @@ make -j"$NPROC" CFLAGS="-fPIC -O2 -g -D_FILE_OFFSET_BITS=64"
 make install PREFIX="$DEPS_DIR"
 cd ..
 
+# Build gettext (for autopoint, required by liblzma)
+echo "Building gettext (for autopoint)..."
+curl -OL https://ftp.gnu.org/pub/gnu/gettext/gettext-0.22.5.tar.gz
+tar -xzf gettext-0.22.5.tar.gz
+cd gettext-0.22.5
+./configure --prefix="$DEPS_DIR" --disable-shared --enable-static --with-pic --without-git
+make -j"$NPROC"
+make install
+cd ..
+
 # Build liblzma (XZ Utils)
 echo "Building liblzma..."
 git clone https://git.tukaani.org/xz.git
 cd xz
-./autogen.sh || true  # autogen.sh may return non-zero due to po4a warning, but that's ok
+./autogen.sh || true
 ./configure --prefix="$DEPS_DIR" --enable-static --disable-shared --with-pic --disable-doc
 make -j"$NPROC" CFLAGS="-fPIC"
+make install
+cd ..
+
+# Build xorg-macros (required by libXau, etc.)
+echo "Building xorg-macros..."
+git clone https://gitlab.freedesktop.org/xorg/util/macros.git
+cd macros
+./autogen.sh
+./configure --prefix="$DEPS_DIR"
+make install
+cd ..
+
+# Build xorgproto
+echo "Building xorgproto..."
+git clone https://gitlab.freedesktop.org/xorg/proto/xorgproto.git
+cd xorgproto
+./autogen.sh
+./configure --prefix="$DEPS_DIR"
+make install
+cd ..
+
+# Build xcb-proto (required by libxcb)
+echo "Building xcb-proto..."
+git clone https://gitlab.freedesktop.org/xorg/proto/xcbproto.git
+cd xcbproto
+./autogen.sh
+./configure --prefix="$DEPS_DIR"
 make install
 cd ..
 
@@ -53,23 +95,23 @@ make -j"$NPROC" CFLAGS="-fPIC"
 make install
 cd ..
 
-# Build xcb-proto (required by libxcb)
-echo "Building xcb-proto..."
-git clone https://gitlab.freedesktop.org/xorg/proto/xcbproto.git
-cd xcbproto
-./autogen.sh
-./configure --prefix="$DEPS_DIR"
-make install
-cd ..
-
 # Build libxcb
 echo "Building libxcb..."
 git clone https://gitlab.freedesktop.org/xorg/lib/libxcb.git
 cd libxcb
-export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig:$DEPS_DIR/share/pkgconfig"
 ./autogen.sh
 ./configure --prefix="$DEPS_DIR" --enable-static --disable-shared --with-pic
 make -j"$NPROC" CFLAGS="-fPIC"
+make install
+cd ..
+
+# Build nasm (required by x264, x265)
+echo "Building nasm..."
+curl -OL https://www.nasm.us/pub/nasm/releasebuilds/2.16.01/nasm-2.16.01.tar.gz
+tar -xzf nasm-2.16.01.tar.gz
+cd nasm-2.16.01
+./configure --prefix="$DEPS_DIR"
+make -j"$NPROC"
 make install
 cd ..
 
@@ -119,6 +161,7 @@ cmake -G "Unix Makefiles" \
   -DENABLE_CLI=OFF \
   -DCMAKE_INSTALL_PREFIX="$DEPS_DIR" \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DENABLE_PKGCONFIG=ON \
   ../source
 make -j"$NPROC"
 make install
@@ -129,8 +172,7 @@ echo "Building FFmpeg 6.1..."
 git clone --depth 1 --branch n6.1 https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_SRC"
 cd "$FFMPEG_SRC"
 
-export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig"
-
+# Note: PKG_CONFIG_PATH is set at the top of the script
 ./configure \
   --prefix="$FFMPEG_DIR" \
   --disable-shared \
@@ -146,8 +188,9 @@ export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig"
   --enable-libvpx \
   --enable-libopus \
   --enable-libmp3lame \
-  --extra-cflags="-fPIC" \
-  --extra-cxxflags="-fPIC"
+  --extra-cflags="-fPIC -I$DEPS_DIR/include" \
+  --extra-cxxflags="-fPIC -I$DEPS_DIR/include" \
+  --extra-ldflags="-L$DEPS_DIR/lib -L$DEPS_DIR/lib64"
 
 make -j"$NPROC"
 make install
