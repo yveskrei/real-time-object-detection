@@ -6,6 +6,9 @@ fn main() {
     println!("cargo:rustc-link-search=native={}/lib", ffmpeg_dir);
     println!("cargo:rustc-link-search=native={}/lib", deps_dir);
     
+    // Add this line to link against libxcb
+    println!("cargo:rustc-link-lib=xcb");
+    
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=DEPS_DIR");

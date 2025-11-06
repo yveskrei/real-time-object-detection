@@ -22,6 +22,7 @@ done
 
 # Set environment variables
 export PLAYER_BACKEND_URL="http://127.0.0.1:8702"
+export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
 export RUST_LOG=INFO
 
 # Start binary

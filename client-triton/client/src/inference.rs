@@ -103,7 +103,7 @@ pub struct InferenceModel {
     triton_config: TritonConfig,
     model_config: ModelConfig,
     base_request: ModelInferRequest,
-    stats_handle: tokio::task::JoinHandle<()>
+    stats_handle: std::thread::JoinHandle<()>
 }
 
 impl InferenceModel {
@@ -161,7 +161,7 @@ impl InferenceModel {
         // Spawn seperate task to monitor GPU stats
         let stats_interval = GPU_STATS_INTERVAL.clone();
 
-        let stats_handle = tokio::task::spawn_blocking(move || {
+        let stats_handle = std::thread::spawn(move || {
             loop {
                 let measure_time = Instant::now();
 
@@ -421,14 +421,7 @@ impl InferenceModel {
         &self.base_request
     }
 
-    pub fn stats_handle(&self) -> &tokio::task::JoinHandle<()> {
+    pub fn stats_handle(&self) -> &std::thread::JoinHandle<()> {
         &self.stats_handle
-    }
-}
-
-impl Drop for InferenceModel {
-    fn drop(&mut self) {
-        // Abort tokio task
-        self.stats_handle.abort();
     }
 }

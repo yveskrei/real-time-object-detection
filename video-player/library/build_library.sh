@@ -12,9 +12,9 @@ fi
 
 cd "$PROJECT_ROOT"
 
-echo "Building Rust library with static FFmpeg..."
+echo "Building Rust library with static FFmpeg and XCB..."
 
-export PKG_CONFIG_PATH="$FFMPEG_DIR/lib/pkgconfig:$DEPS_DIR/lib/pkgconfig"
+export PKG_CONFIG_PATH="$FFMPEG_DIR/lib/pkgconfig:$DEPS_DIR/lib/pkgconfig:$DEPS_DIR/share/pkgconfig"
 export PKG_CONFIG_STATIC=1
 export FFMPEG_DIR="$FFMPEG_DIR"
 export DEPS_DIR="$DEPS_DIR"
@@ -27,8 +27,10 @@ export RUSTFLAGS="-C link-args=-Wl,--whole-archive \
 -L$FFMPEG_DIR/lib -lavcodec -lavformat -lavutil -lavfilter -lswscale -lswresample -lpostproc \
 -L$DEPS_DIR/lib -lx264 -lx265 -lvpx -lopus -lmp3lame \
 -Wl,--no-whole-archive \
+-L$DEPS_DIR/lib -lxcb -lxcb-shm -lxcb-shape -lxcb-xfixes -lXau -lXdmcp -llzma -lbz2 \
 -lstdc++ -lm -lz -lpthread -ldl"
 
+cargo clean
 cargo build --release
 
 echo "✅ Build complete!"

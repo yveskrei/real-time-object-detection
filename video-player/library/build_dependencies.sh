@@ -15,6 +15,64 @@ mkdir -p "$DEPS_DIR"
 
 cd "$DEPS_DIR"
 
+# Build libbz2 (bzip2)
+echo "Building libbz2..."
+git clone https://sourceware.org/git/bzip2.git
+cd bzip2
+make -j"$NPROC" CFLAGS="-fPIC -O2 -g -D_FILE_OFFSET_BITS=64"
+make install PREFIX="$DEPS_DIR"
+cd ..
+
+# Build liblzma (XZ Utils)
+echo "Building liblzma..."
+git clone https://git.tukaani.org/xz.git
+cd xz
+./autogen.sh || true  # autogen.sh may return non-zero due to po4a warning, but that's ok
+./configure --prefix="$DEPS_DIR" --enable-static --disable-shared --with-pic --disable-doc
+make -j"$NPROC" CFLAGS="-fPIC"
+make install
+cd ..
+
+# Build libXau (required by libxcb)
+echo "Building libXau..."
+git clone https://gitlab.freedesktop.org/xorg/lib/libxau.git
+cd libxau
+./autogen.sh
+./configure --prefix="$DEPS_DIR" --enable-static --disable-shared --with-pic
+make -j"$NPROC" CFLAGS="-fPIC"
+make install
+cd ..
+
+# Build libXdmcp (required by libxcb)
+echo "Building libXdmcp..."
+git clone https://gitlab.freedesktop.org/xorg/lib/libxdmcp.git
+cd libxdmcp
+./autogen.sh
+./configure --prefix="$DEPS_DIR" --enable-static --disable-shared --with-pic
+make -j"$NPROC" CFLAGS="-fPIC"
+make install
+cd ..
+
+# Build xcb-proto (required by libxcb)
+echo "Building xcb-proto..."
+git clone https://gitlab.freedesktop.org/xorg/proto/xcbproto.git
+cd xcbproto
+./autogen.sh
+./configure --prefix="$DEPS_DIR"
+make install
+cd ..
+
+# Build libxcb
+echo "Building libxcb..."
+git clone https://gitlab.freedesktop.org/xorg/lib/libxcb.git
+cd libxcb
+export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig:$DEPS_DIR/share/pkgconfig"
+./autogen.sh
+./configure --prefix="$DEPS_DIR" --enable-static --disable-shared --with-pic
+make -j"$NPROC" CFLAGS="-fPIC"
+make install
+cd ..
+
 # Build libmp3lame
 echo "Building libmp3lame..."
 git clone https://github.com/lameproject/lame.git
