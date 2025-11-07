@@ -7,6 +7,7 @@ pub mod utils;
 pub mod inference;
 pub mod processing;
 pub mod client_video;
+pub mod source;
 
 pub static TOKIO_RUNTIME: OnceCell<Handle> = OnceCell::const_new();
 

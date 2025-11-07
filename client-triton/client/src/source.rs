@@ -9,10 +9,8 @@ use tokio::time::{Duration, interval, Instant};
 use tokio::sync::{RwLock, Semaphore, OnceCell};
 
 // Custom modules
-use crate::inference::{
-    self, 
-    queue::FixedSizeQueue
-};
+use crate::inference;
+use crate::utils::queue::FixedSizeQueue;
 use crate::processing::{self, RawFrame, ResultBBOX, ResultEmbedding};
 use crate::utils::config::{AppConfig, SourceConfig, InferenceModelType, InferenceTask};
 use crate::utils::kafka::Kafka;
@@ -158,7 +156,6 @@ impl SourceStats {
 /// 2. inference_frame: How many frames we want to skip before performing inference. In other words, 
 /// "Inference on every N frame". This allows us to skip inference on frames when source has higher frame
 /// rate, having minimal effect on the end user's experience.
-#[allow(dead_code)]
 pub struct SourceProcessor {
     // Settings for multi-threading
     queue: Arc<FixedSizeQueue<Arc<RawFrame>>>,
@@ -405,7 +402,7 @@ impl SourceProcessor {
                 let embedding_model = inference::get_inference_model(InferenceModelType::DINO)?;
                 let embedding_bboxes = Arc::clone(&bboxes);
                 let embedding_frame = Arc::clone(&frame);
-                let (mut embedding_stats, embeddings) = processing::dino::process_frame(
+                let (mut embedding_stats, embeddings): (FrameProcessStats, Vec<ResultEmbedding>) = processing::dino::process_frame(
                     &embedding_model,
                     embedding_frame,
                     embedding_bboxes
@@ -525,41 +522,53 @@ impl SourceProcessor {
             );
         };
 
-        // if let Err(e) = Kafka::populate_bboxes(
-        //     source_id,
-        //     frame,
-        //     &bboxes
-        // ).await {
-        //     tracing::warn!(
-        //         source_id=source_id,
-        //         error=e.to_string(),
-        //         "Failed to populate bboxes to Kafka"
-        //     );
-        // };
+
+        // Send to Kafka - don't wait for results
+        // Will run in a seperate task
+        let kafka_source_id = Arc::clone(&source_id);
+        let kafka_frame = Arc::clone(&frame);
+        let kafka_bboxes = Arc::clone(&bboxes);
+
+        tokio::task::spawn(async move {
+            if let Err(e) = Kafka::populate_bboxes(
+                &kafka_source_id,
+                &kafka_frame,
+                &kafka_bboxes
+            ).await {
+                tracing::warn!(
+                    source_id=&*kafka_source_id,
+                    error=e.to_string(),
+                    "Failed to populate bboxes to Kafka"
+                );
+            };
+        });
     }
 
     /// Populates embedding to third party services
-    #[allow(unused_variables)]
     pub async fn populate_embeddings(
         source_id: Arc<String>, 
         frame: Arc<RawFrame>, 
         embeddings: Arc<Vec<ResultEmbedding>>
     ) {
-        // tracing::warn!(
-        //     embeddings_len=embeddings.len(),
-        //     "got embeddings to populate"
-        // )
-        // if let Err(e) = Kafka::populate_embedding(
-        //     source_id,
-        //     frame,
-        //     &embedding
-        // ).await {
-        //     tracing::warn!(
-        //         source_id=source_id,
-        //         error=e.to_string(),
-        //         "Failed to populate embedding to Kafka"
-        //     );
-        // };
+        // Send to Kafka - don't wait for results
+        // Will run in a seperate task
+        let kafka_source_id = Arc::clone(&source_id);
+        let kafka_frame = Arc::clone(&frame);
+        let kafka_embeddings = Arc::clone(&embeddings);
+
+        tokio::task::spawn(async move {
+            if let Err(e) = Kafka::populate_embeddings(
+                &kafka_source_id,
+                &kafka_frame,
+                &kafka_embeddings
+            ).await {
+                tracing::warn!(
+                    source_id=&*kafka_source_id,
+                    error=e.to_string(),
+                    "Failed to populate embeddings to Kafka"
+                );
+            };
+        });
     }
 }
 

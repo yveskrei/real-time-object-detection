@@ -58,26 +58,6 @@ class APIClient:
     def add_bboxes(self, video_id: int, bboxes: List[dict]) -> dict:
         """
         Add bounding boxes with raw PTS timestamps
-        
-        Args:
-            video_id: The video/stream ID
-            bboxes: List of bbox dicts, each containing:
-                - pts: int (raw PTS value from stream, not converted)
-                - top_left_corner: int
-                - bottom_right_corner: int
-                - class_name: str
-                - confidence: float
-        
-        Example:
-            bboxes = [
-                {
-                    "pts": 450000,  # Raw PTS (not milliseconds)
-                    "top_left_corner": 153600,
-                    "bottom_right_corner": 345600,
-                    "class_name": "person",
-                    "confidence": 0.95
-                }
-            ]
         """
         data = {
             "stream_id": video_id,

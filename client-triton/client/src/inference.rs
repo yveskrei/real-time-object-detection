@@ -16,8 +16,6 @@ use anyhow::{self, Result, Context};
 use std::time::{Duration, Instant};
 
 // Custom modules
-pub mod source;
-pub mod queue;
 use crate::utils::{
     self,
     GPUStats,

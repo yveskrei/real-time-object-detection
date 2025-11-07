@@ -63,10 +63,8 @@ models/
 sources/
 *Cargo.lock
 *target/
-*offline-crates/
 *triton_logs/
 *triton_models/
-video-player/library/dependencies/
+video-streamer/library/dependencies/
 *.mp4
 *.so
-*config.yaml

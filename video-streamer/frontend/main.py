@@ -13,7 +13,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self, backend_url: str):
         super().__init__()
-        self.setWindowTitle("Video Stream Management (WebSocket)")
+        self.setWindowTitle("Live Video Stream Management")
         self.setGeometry(100, 100, 1400, 900)
         
         # Store backend URL for WebSocket connections
@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
         
         # Add tabs
         self.management_tab = ManagementTab(self.api_client)
-        self.viewer_tab = ViewerTab(self.api_client, self.backend_url)  # Pass backend URL
+        self.viewer_tab = ViewerTab(self.api_client, self.backend_url)
         
         tabs.addTab(self.management_tab, "📁 Management")
         tabs.addTab(self.viewer_tab, "📺 Stream Viewer")
@@ -37,7 +37,7 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Video Stream Management with WebSocket')
+    parser = argparse.ArgumentParser(description='Video Stream Management Application')
     parser.add_argument('backend_url', type=str, help='Backend API URL (e.g., http://localhost:8702)')
     
     args = parser.parse_args()

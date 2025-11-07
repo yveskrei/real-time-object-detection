@@ -5,10 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 // Custom modules
-use crate::inference::{
-    source::FrameProcessStats, 
-    InferenceModel
-};
+use crate::inference::InferenceModel;
+use crate::source::FrameProcessStats;
 use crate::processing::{self, RawFrame, ResultEmbedding, ResultBBOX};
 use crate::utils::config::InferencePrecision;
 

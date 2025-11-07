@@ -8,7 +8,7 @@ use serde_json::json;
 use std::ffi::CString;
 
 // Custom modules
-use crate::inference::source;
+use crate::source;
 use crate::utils::config::AppConfig;
 use crate::processing::{RawFrame, ResultBBOX};
 

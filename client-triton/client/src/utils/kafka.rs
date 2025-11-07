@@ -94,13 +94,17 @@ impl Kafka {
         Ok(())
     }
 
-    pub async fn populate_embedding(source_id: &str, frame: &RawFrame, embedding: &ResultEmbedding) -> Result<()>{
+    pub async fn populate_embeddings(source_id: &str, frame: &RawFrame, embeddings: &[ResultEmbedding]) -> Result<()>{
         let producer = get_kafka_producer()?;
+        let data: Vec<u8> = embeddings
+            .iter()
+            .flat_map(|e| e.get_raw_bytes())
+            .collect();
 
         producer.produce(
-            &producer.config.topic_bboxes, 
+            &producer.config.topic_embedding, 
             &format!("{}-{}", source_id, frame.pts), 
-            &embedding.get_raw_bytes()
+            &data
         ).await?;
 
         Ok(())

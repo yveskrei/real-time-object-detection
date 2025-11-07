@@ -28,3 +28,5 @@ dnf install -y \
 # Build the library
 ./build_library.sh
 ```
+
+The script `build_library.sh` will compile the Rust code and generate a shared object file (`.so`) that can be used in your application. The resulting `.so` file will be located in the `target/release` directory.

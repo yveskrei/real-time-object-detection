@@ -3,10 +3,8 @@ use std::time::Instant;
 use std::sync::Arc;
 
 // Custom modules
-use crate::inference::{
-    source::FrameProcessStats, 
-    InferenceModel
-};
+use crate::inference::InferenceModel;
+use crate::source::FrameProcessStats;
 use crate::processing::{self, RawFrame, ResultBBOX};
 use crate::utils::config::SourceConfig;
 use crate::utils::config::InferencePrecision;

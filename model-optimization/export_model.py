@@ -4,9 +4,10 @@ import torch.onnx
 from pathlib import Path
 import os
 import onnx
+from onnxconverter_common import float16
 
 # Custom modules
-from export_utils import ModelType, get_dinov3_model, get_yolov9_model
+from export_utils import ModelType, get_dinov3_model, get_yolov9_model, remove_training_nodes, clean_unused_weights
 
 def export_model(
     model_name: str,
@@ -49,27 +50,28 @@ def export_model(
         keep_initializers_as_inputs=False,
         dynamo=False
     )
+    model_fp32 = onnx.load(path_fp32)
     print("FP32 export successful")
+
+    # Performing pre-conversion optimizations for FP16
+    print("Performing pre-conversion optimizations for FP16..")
+    model_fp32 = remove_training_nodes(model_fp32)
+    model_fp32 = clean_unused_weights(model_fp32)
     
     # Convert to FP16
     print("Converting to FP16 precision...")
-    torch.onnx.export(
-        model.half(),
-        dummy_input.half(),
-        path_fp16,
-        input_names=[input_name],
-        output_names=[output_name],
-        opset_version=18,
-        do_constant_folding=True,
-        dynamic_axes={
-            input_name: {0: 'batch_size'},
-            output_name: {0: 'batch_size'}
-        },
-        export_params=True,
-        keep_initializers_as_inputs=False,
-        dynamo=False
+    model_fp16 = float16.convert_float_to_float16(
+        model_fp32, 
+        keep_io_types=False,
+        disable_shape_infer=False
     )
-    print("FP16 conversion successful")
+
+    # Perform post-conversion optimizations for FP16
+    print("Performing post-conversion optimizations for FP16..")
+    model_fp16 = clean_unused_weights(model_fp16)
+
+    onnx.save(model_fp16, path_fp16)
+    print("FP16 export successful")
     
     # Validate and save
     try:

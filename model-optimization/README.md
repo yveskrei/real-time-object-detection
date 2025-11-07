@@ -1,21 +1,35 @@
 ## Model Conversion
-This step involves converting the raw `.pt` frame you got(whether its self made or pre-made - e.g. YOLOV9), to a format that is the most performant in a production system. We essentially want to get the fastest inference time, with minimal accuracy loss.
+The following folder contains scripts that involve converting the raw `.pt` frame you got(whether its self made or pre-made - e.g. YOLOV9), to a format that is the most performant in a production system. We essentially want to get the fastest inference time, with minimal accuracy loss.
 
-We first need to convert our model from `.pt` to ONNX, which is a universal format for machine learning models. We convert the model with the following script:
-
-```
-python3.11 scripts/export_yolo_triton.py --model-path <PT_PATH>
-```
-This will output model_**fp16** and model_**fp32** files, which represent the same model with different datatype formats. <br>
+We first need to convert our model from `.pt` to `.onnx`, which is a universal format for machine learning models.
+The conversion will result with model_**fp16** and model_**fp32** files, which represent the same model with different datatype formats. <br>
 **FP16** Models are essentially equal in accuracy(for inference) and are much lighter and faster to run, and it is recommanded to use. 
 
 Next, we would be converting the `.onnx` file we have to `.engine`, using NVIDIA's TensorRT tool.<br>
 TensorRT compiles a model for your specific achitecture(one used at time of compilation), therefore making it very efficient when running on your machine.<br>
-We would be doing the TensorRT conversion from within the docker image of Triton Server, to ensure its compatibility with the compiled model.
 
-The following command is used for converting a model (with support of batch inference):
+## Pytorch to Onnx Conversion
+The following command is used for converting a model from Pytorch to Onnx:
 ```bash
-# YOLOV9-e
+# YOLOV9
+python3.11 export_model.py \
+  --model_type YOLOV9 \
+  --model_path MODEL.pt \
+  --model-source-code ./yolov9/
+
+# DINOV3
+python3.11 export_model.py \
+  --model_type DINOV3 \
+  --model_path MODEL.pt \
+  --model-source-code ./dinov3/
+  --dino-type dinov3_vitb16
+```
+
+## Onnx to TensorRT Conversion
+The following command is used for converting a model (with support of batch inference).<br>
+We would be doing the TensorRT conversion from within the docker image of Triton Server, to ensure its compatibility with the compiled model:
+```bash
+# YOLOV9
 /usr/src/tensorrt/bin/trtexec \
     --onnx=MODEL.onnx \
     --saveEngine=CONVERTED.engine \

@@ -1,7 +1,8 @@
 use anyhow::{Result, Context};
 
 // Custom modules
-use client::inference::{self, source};
+use client::inference;
+use client::source;
 use client::utils::{
     kafka,
     config::AppConfig
@@ -18,10 +19,10 @@ async fn main() -> Result<()> {
         .await
         .context("Error initializing tokio runtime")?;
 
-    // // Initiate Kafka producer
-    // kafka::init_kafka_producer(&app_config)
-    //     .await
-    //     .context("Error initiating Kafka producer")?;
+    // Initiate Kafka producer
+    kafka::init_kafka_producer(&app_config)
+        .await
+        .context("Error initiating Kafka producer")?;
 
     // Initiate inference client
     inference::init_inference_models(&app_config)
