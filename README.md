@@ -13,6 +13,7 @@ Refer to the [`client-triton/README.md`](client-triton/README.md) for more detai
 
 ## Video Streamer
 The [`video-streamer`](video-streamer) folder includes a backend, user interface and external dynamic library(.so) to stream/display video streams with low latency, including AI analytics results sent by various sources.<br>
+Please refer to the [`video-streamer/README.md`](video-streamer/README.md) for more details.
 
 ## Model Optimization
 The [`model-optimization`](model-optimization) folder includes scripts and instructions to convert a raw PyTorch model to a highly optimized TensorRT engine, ready to be deployed on Triton Server for maximum performance.<br>
