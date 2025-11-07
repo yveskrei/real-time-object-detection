@@ -5,6 +5,7 @@ use nvml_wrapper::Nvml;
 // Custom modules
 pub mod config;
 pub mod kafka;
+pub mod queue;
 
 /// Represents GPU statistics that are reported by the application
 pub struct GPUStats {
@@ -19,7 +20,7 @@ pub struct GPUStats {
 }
 
 /// used to get image from path, returns as raw bytes
-pub fn get_image_raw(path: &str) -> Result<(Vec<u8>, usize, usize)> {
+pub fn get_image_raw(path: &str) -> Result<(Vec<u8>, u32, u32)> {
     let image = ImageReader::open(path)
         .context("Error opening image from path")?
         .decode()
@@ -27,8 +28,6 @@ pub fn get_image_raw(path: &str) -> Result<(Vec<u8>, usize, usize)> {
 
     // Get dimensions
     let (width, height) = image.dimensions();
-    let width = width as usize;
-    let height = height as usize;
 
     // Convert to RGB8 if needed
     let img_rgb8 = image.to_rgb8();

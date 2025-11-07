@@ -10,151 +10,98 @@ use triton_client::inference::model_infer_request::{InferInputTensor, InferReque
 use triton_client::inference::model_repository_parameter::{ParameterChoice};
 use std::collections::HashMap;
 use serde_json::json;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use anyhow::{self, Result, Context};
-use tokio::time::{Duration, interval};
+use std::time::{Duration, Instant};
 
 // Custom modules
-pub mod source;
-pub mod queue;
 use crate::utils::{
     self,
     GPUStats,
     config::{AppConfig, ModelConfig, TritonConfig}
 };
+use crate::utils::config::{InferenceModelType, InferencePrecision};
 
 // Variables
-pub static INFERENCE_MODEL: OnceCell<Arc<InferenceModel>> = OnceCell::const_new();
-pub static GPU_STATS_INTERVAL: Duration = Duration::from_secs(3);
+pub static INFERENCE_MODELS: OnceCell<HashMap<InferenceModelType, Arc<InferenceModel>>> = OnceCell::const_new();
+pub static GPU_STATS_INTERVAL: Duration = Duration::from_secs(200);
 
 /// Returns the inference model instance, if initiated
-pub fn get_inference_model() -> Result<&'static Arc<InferenceModel>> {
+pub fn get_inference_model(model_type: InferenceModelType) -> Result<&'static Arc<InferenceModel>> {
     Ok(
-        INFERENCE_MODEL
+        INFERENCE_MODELS
             .get()
+            .context("Infernece models are not initiated!")?
+            .get(&model_type)
             .context("Infernece model is not initiated!")?
     )
 }
 
 /// Initiates a single instance of a model for inference
-pub async fn init_inference_model(app_config: &AppConfig) -> Result<()> {
-    if let Ok(_) = get_inference_model() {
-        anyhow::bail!("Model is already initiated!")
+pub async fn init_inference_models(app_config: &AppConfig) -> Result<()> {
+    if let Some(_) = INFERENCE_MODELS.get() {
+        anyhow::bail!("Models are already initiated!")
     }
 
-    // Create new instance
-    let client_instance = InferenceModel::new(
-        app_config.triton_config().clone(),
-        app_config.model_config().clone(),
-    )
-        .await
-        .context("Error creating model client")?;
+    // Create model instances
+    let mut models: HashMap<InferenceModelType, Arc<InferenceModel>> = HashMap::new();
+    for (model_type, model_config) in app_config.inference_config().models.iter() {
+        // Create single instance
+        let client_instance = InferenceModel::new(
+            app_config.triton_config().clone(),
+            model_config.clone(),
+        )
+            .await
+            .context("Error creating model client")?;
+
+        models.insert(
+            model_type.clone(),
+            Arc::new(client_instance)
+        );
+    }
 
     // Set global variable
-    INFERENCE_MODEL.set(Arc::new(client_instance))
-        .map_err(|_| anyhow::anyhow!("Error setting model instance"))?;
+    INFERENCE_MODELS.set(models)
+        .map_err(|_| anyhow::anyhow!("Error setting model instances"))?;
 
     Ok(())
 }
 
-pub async fn start_model_instances(app_config: &AppConfig) -> Result<()> {
-    let client_instance = get_inference_model()?;
-
+pub async fn start_models_instances(app_config: &AppConfig) -> Result<()> {
     // Calculate total "load units" - how much processing capacity we need
     // Each source contributes fractional load based on its frame rate
-    let total_load: f32 = app_config
+    let instances: u32 = app_config
         .sources_config()
         .sources
-        .values()
-        .map(|source_config| 1.0 / source_config.inf_frame as f32)
-        .sum();
-    
-    // Get target batch size from config
-    let target_batch_size = app_config.model_config()
-        .perf_batch_sizes
-        .iter()
-        .max()
-        .copied()
-        .unwrap_or(app_config.model_config().max_batch_size) as f32;
-    
-    // Calculate instances needed
-    // Divide total load by target batch size to get base instances
-    // Add small overhead for arrival variance
-    let batch_efficiency = 0.60; // Assume X% batch fill rate in practice
-    let instances = (total_load / (target_batch_size * batch_efficiency))
-        .ceil()
-        .max(1.0) as usize;
+        .len() as u32;
 
-    // Clear previous model instances
-    if let Ok(_) = client_instance.unload_model().await {
-        tracing::warn!("Unloaded previous model instances")
+    // Load same amount of instances for each model type
+    for model_type in app_config.inference_config().models.keys() {
+        let client_instance = get_inference_model(model_type.clone())?;
+
+        // Clear previous model instances
+        if let Ok(_) = client_instance.unload_model().await {
+            tracing::warn!("Unloaded previous model instances for type {}", model_type.to_string());
+        }
+
+        // Initiate model instances
+        client_instance.load_model(instances).await
+            .context("Error loading model instances")?;
+
+        tracing::info!("Initiated {} model instances for type {}", instances, model_type.to_string());
     }
-
-    // Initiate model instances
-    client_instance.load_model(instances).await
-        .context("Error loading model instances")?;
-
-    tracing::info!("Initiated {} model instances", instances);
 
     Ok(())
-}
-
-/// Represents the inference model precision type
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum InferencePrecision {
-    FP32,
-    FP16
-}
-
-impl InferencePrecision {
-    pub fn to_string(&self) -> String {
-        match self {
-            InferencePrecision::FP32 => "FP32",
-            InferencePrecision::FP16 => "FP16",
-        }.to_string()
-    }
-}
-
-impl FromStr for InferencePrecision {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_uppercase().as_str() {
-            "FP32" => Ok(InferencePrecision::FP32),
-            "FP16" => Ok(InferencePrecision::FP16),
-            _ => anyhow::bail!("Invalid precision")
-        }
-    }
-}
-
-/// Represents type of inference model
-#[derive(Clone)]
-pub enum InferenceModelType {
-    YOLO,
-    DINO
-}
-
-impl FromStr for InferenceModelType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_uppercase().as_str() {
-            "YOLO" => Ok(InferenceModelType::YOLO),
-            "DINO" => Ok(InferenceModelType::DINO),
-            _ => anyhow::bail!("Invalid model type")
-        }
-    }
 }
 
 /// Represents an instance of an inference model
 pub struct InferenceModel {
-    client: Client,
+    client: Arc<Client>,
     triton_config: TritonConfig,
     model_config: ModelConfig,
     base_request: ModelInferRequest,
-    stats_handle: tokio::task::JoinHandle<()>
+    stats_handle: std::thread::JoinHandle<()>
 }
 
 impl InferenceModel {
@@ -182,12 +129,12 @@ impl InferenceModel {
         }
 
         // Create base inference request
-        let mut batch_input_shape = vec![1];
+        let mut batch_input_shape = Vec::with_capacity(&model_config.input_shape.len() + 1);
         batch_input_shape.extend(&model_config.input_shape);
 
         let base_request = ModelInferRequest {
-            model_name: triton_config.model_name.to_string(),
-            model_version: triton_config.model_version.to_string(),
+            model_name: model_config.name.to_string(),
+            model_version: "1".to_string(),
             id: String::new(),
             parameters: HashMap::new(),
             inputs: vec![
@@ -211,41 +158,37 @@ impl InferenceModel {
 
         // Spawn seperate task to monitor GPU stats
         let stats_interval = GPU_STATS_INTERVAL.clone();
-        let stats_handle = tokio::spawn(async move {
-            let mut interval = interval(stats_interval);
-            
+
+        let stats_handle = std::thread::spawn(move || {
             loop {
-                interval.tick().await;
-                
-                // NVML Is execution blocking, running it seperately
-                let gpu_stats = tokio::task::spawn_blocking(|| {
-                    let result = utils::get_gpu_statistics();
+                let measure_time = Instant::now();
 
-                    match result {
-                        Ok(stats) => {
-                            InferenceModel::process_gpu_stats(stats);
-                        },
-                        Err(e) => {
-                            tracing::warn!(
-                                error=e.to_string(),
-                                "Error getting GPU utilization information"
-                            )
-                        }
+                // Get GPU statistics
+                let stats_result = utils::get_gpu_statistics();
+
+                match stats_result {
+                    Ok(stats) => {
+                        InferenceModel::process_gpu_stats(stats);
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            error=e.to_string(),
+                            "Error getting GPU utilization information"
+                        )
                     }
-                }).await;
+                };
 
-                if let Err(e) = gpu_stats {
-                    tracing::warn!(
-                        error=e.to_string(),
-                        "Error getting GPU utilization information"
-                    )
+                // Sleep if time remains
+                let remainder = measure_time.elapsed();
+                if remainder < stats_interval {
+                    let duration = stats_interval - remainder;
+                    std::thread::sleep(duration);
                 }
-
             }
         });
 
         Ok(Self { 
-            client,
+            client: Arc::new(client),
             triton_config,
             model_config,
             base_request,
@@ -258,7 +201,7 @@ impl InferenceModel {
         // Unload previous instances of model we're about to load
         self.client.repository_model_unload(RepositoryModelUnloadRequest { 
             repository_name: "".to_string(), 
-            model_name: self.triton_config().model_name.to_string(), 
+            model_name: self.model_config().name.to_string(), 
             parameters: HashMap::new()
         })
             .await
@@ -268,11 +211,11 @@ impl InferenceModel {
     }
     
     /// Loads given amount of instances of a given model
-    pub async fn load_model(&self, instances: usize) -> Result<()> {
+    pub async fn load_model(&self, instances: u32) -> Result<()> {
         let model_config = json!({
-            "name": &self.triton_config().model_name.to_string(),
+            "name": &self.model_config().name,
             "platform": "tensorrt_plan",
-            "max_batch_size": &self.model_config().max_batch_size,
+            "max_batch_size": &self.model_config().batch_max_size,
             "input": [
                 {
                     "name": &self.model_config().input_name,
@@ -295,8 +238,9 @@ impl InferenceModel {
                 }
             ],
             "dynamic_batching": {
-                "max_queue_delay_microseconds": self.model_config().max_queue_delay,
-                "preferred_batch_size": &self.model_config().perf_batch_sizes
+                "max_queue_delay_microseconds": self.model_config().batch_max_queue_delay,
+                "preferred_batch_size": &self.model_config().batch_preferred_sizes,
+                "preserve_ordering": false
             },
             "optimization": {
                 "execution_accelerators": {
@@ -324,7 +268,7 @@ impl InferenceModel {
             "model_warmup": [
                 {
                     "name": "warmup_random",
-                    "batch_size": self.model_config().max_batch_size,
+                    "batch_size": self.model_config().batch_max_size,
                     "inputs":  {
                         &self.model_config().input_name: {
                             "dims": &self.model_config().input_shape,
@@ -345,7 +289,7 @@ impl InferenceModel {
         // Load selected model
         self.client.repository_model_load(RepositoryModelLoadRequest { 
             repository_name: "".to_string(), 
-            model_name: self.triton_config().model_name.to_string(), 
+            model_name: self.model_config().name.to_string(), 
             parameters: parameters
         })
             .await
@@ -354,36 +298,93 @@ impl InferenceModel {
         Ok(())
     }
 
-    /// Performs inference on a raw input, returning raw model results
-    pub async fn infer(&self, raw_input: Vec<u8>) -> Result<Vec<u8>> {        
-        // tracing::info!("inference!");
-        // Create new inference request
-        let mut inference_request = self.base_request.clone();
-        inference_request.raw_input_contents.push(raw_input);
-
-        // Perform inference
-        let inference_result = self.client.model_infer(inference_request)
-            .await
-            .context("Error sending triton inference request")?;
-
-        // Return inference results
-        Ok(
-            inference_result.raw_output_contents
-                .into_iter()
-                .next()
-                .context("Error getting inference results for raw input")?
-        )
-    }
-
-    /// Get Triton Server alive status
-    pub async fn is_alive(&self) -> bool {
-        let server_alive = &self.client.server_live().await;
+    /// Performs inference on many raw inputs, returning raw model results
+    /// Automatically batches requests up to max_batch_size and processes batches concurrently
+    pub async fn infer(&self, raw_inputs: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>> {
+        let max_batch_size = self.model_config.batch_max_size as usize;
+        let num_inputs = raw_inputs.len();
         
-        match server_alive {
-            Ok(response) => return response.live,
-            Err(_) => return false
-
+        // Calculate output size per sample once
+        let output_size_per_sample: usize = self.model_config.output_shape
+            .iter()
+            .map(|&dim| dim as usize)
+            .product::<usize>() * match self.model_config.precision {
+                InferencePrecision::FP16 => 2,
+                InferencePrecision::FP32 => 4,
+            };
+        
+        // Pre-allocate result slots - direct placement, no sorting
+        let mut all_results: Vec<Vec<u8>> = Vec::with_capacity(num_inputs);
+        all_results.resize_with(num_inputs, Vec::new);
+        
+        // Process all batches concurrently (1 batch if num_inputs <= max_batch_size)
+        let tasks: Vec<_> = raw_inputs
+            .chunks(max_batch_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let batch_size = chunk.len();
+                let start_idx = chunk_idx * max_batch_size;
+                
+                // Concatenate batch for Triton
+                let total_bytes: usize = chunk.iter().map(|v| v.len()).sum();
+                let mut concatenated = Vec::with_capacity(total_bytes);
+                for input in chunk {
+                    concatenated.extend_from_slice(input);
+                }
+                
+                let mut inference_request = self.base_request.clone();
+                inference_request.inputs[0].shape.insert(0, batch_size as i64);
+                inference_request.raw_input_contents = vec![concatenated];
+                
+                let client = Arc::clone(&self.client);
+                let output_size = output_size_per_sample;
+                
+                tokio::spawn(async move {
+                    // Network I/O - async
+                    let inference_result = client.model_infer(inference_request)
+                        .await
+                        .context("Error sending triton inference request")?;
+                    
+                    // CPU work - blocking thread pool
+                    let output_blob = inference_result.raw_output_contents.into_iter().next()
+                        .context("No output from inference")?;
+                    
+                    let batch_results = tokio::task::spawn_blocking(move || {
+                        // Unsafe pointer slicing for blazing speed
+                        let ptr = output_blob.as_ptr();
+                        let mut results = Vec::with_capacity(batch_size);
+                        
+                        unsafe {
+                            for i in 0..batch_size {
+                                let offset = i * output_size;
+                                let slice = std::slice::from_raw_parts(ptr.add(offset), output_size);
+                                results.push(slice.to_vec());
+                            }
+                        }
+                        
+                        results
+                    })
+                    .await
+                    .context("Failed to split batch results")?;
+                    
+                    Ok::<(usize, Vec<Vec<u8>>), anyhow::Error>((start_idx, batch_results))
+                })
+            })
+            .collect();
+        
+        // Await all batches and place directly
+        let results = futures::future::try_join_all(tasks)
+            .await
+            .context("Error performing inference on all inputs")?;
+        
+        for result in results {
+            let (start_idx, batch) = result?;
+            for (i, output) in batch.into_iter().enumerate() {
+                all_results[start_idx + i] = output;
+            }
         }
+        
+        Ok(all_results)
     }
 
     pub fn process_gpu_stats(stats: GPUStats) {
@@ -418,14 +419,7 @@ impl InferenceModel {
         &self.base_request
     }
 
-    pub fn stats_handle(&self) -> &tokio::task::JoinHandle<()> {
+    pub fn stats_handle(&self) -> &std::thread::JoinHandle<()> {
         &self.stats_handle
-    }
-}
-
-impl Drop for InferenceModel {
-    fn drop(&mut self) {
-        // Abort tokio task
-        self.stats_handle.abort();
     }
 }

@@ -5,9 +5,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::sync::OnceCell;
 use std::sync::Arc;
+use rdkafka::message::ToBytes;
 
 // Custom modules
 use crate::utils::config::{KafkaConfig, AppConfig};
+use crate::processing::{ResultBBOX, ResultEmbedding, RawFrame};
 
 // Variables
 pub static KAFKA_PRODUCER: OnceCell<Arc<Kafka>> = OnceCell::const_new();
@@ -63,20 +65,47 @@ impl Kafka {
     }
 
     /// Produces a message to the specified topic
-    pub async fn produce(&self, key: Option<&str>, message: &str) -> Result<()> {
-        let mut record = FutureRecord::to(&self.config.topic)
+    pub async fn produce<T: ToBytes>(&self, topic: &str, key: &str, message: &T) -> Result<()> {
+        let record = FutureRecord::to(topic)
+            .key(key)
             .payload(message);
-    
-        if let Some(k) = key {
-            record = record.key(k);
-        }
 
         self.producer
             .send(record, Timeout::After(Duration::from_secs(5)))
             .await
             .map(|_| ())
             .map_err(|(err, _)| err)
-            .context(format!("Failed to produce message to topic '{}'", &self.config.topic))?;
+            .context(format!("Failed to produce message to topic '{}'", topic))?;
+
+        Ok(())
+    }
+
+    pub async fn populate_bboxes(source_id: &str, frame: &RawFrame, bboxes: &[ResultBBOX]) -> Result<()>{
+        let producer = get_kafka_producer()?;
+        let data = serde_json::to_string(&bboxes)
+            .context("Error parsing bboxes to JSON")?;
+
+        producer.produce(
+            &producer.config.topic_bboxes, 
+            &format!("{}-{}", source_id, frame.pts), 
+            &data
+        ).await?;
+
+        Ok(())
+    }
+
+    pub async fn populate_embeddings(source_id: &str, frame: &RawFrame, embeddings: &[ResultEmbedding]) -> Result<()>{
+        let producer = get_kafka_producer()?;
+        let data: Vec<u8> = embeddings
+            .iter()
+            .flat_map(|e| e.get_raw_bytes())
+            .collect();
+
+        producer.produce(
+            &producer.config.topic_embedding, 
+            &format!("{}-{}", source_id, frame.pts), 
+            &data
+        ).await?;
 
         Ok(())
     }

@@ -1,9 +1,0 @@
-# Conversion of models to onnx
-torch==2.7.1
-onnx==1.18.0
-onnxconverter-common==1.15.0
-onnxruntime-gpu==1.22.0
-GPUtil==1.4.0
-tritonclient[grpc]==2.59.0
-nvidia-ml-py==12.575.51
-numpy==2.2.6
