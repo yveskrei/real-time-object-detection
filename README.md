@@ -1,6 +1,6 @@
 # Real Time Object Detection
-The following repository is a collection of research & production grade scripts allowing you to deploy a real-time object detection inference client using various methods.
-The main goal was to research methods on deploying this kind of system at large scale, leveraging hardware to its limit, while building lightweight and fast software.
+The following repository is a collection of production grade scripts allowing you to deploy a real-time object detection inference system.
+You will be able to deploy such system at a large scale, leveraging hardware to its limit, while maintaining lightweight and fast software.
 
 **View for end users**:<br>
 <img src="assets/video-streamer-ui.png" alt="Video Streamer UI" width="700"/>
