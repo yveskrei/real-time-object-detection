@@ -48,6 +48,17 @@ make -j"$NPROC" CFLAGS="-fPIC"
 make install
 cd ..
 
+# Build zlib
+echo "Building zlib..."
+curl -OL https://www.zlib.net/zlib-1.3.1.tar.gz
+tar -xzf zlib-1.3.1.tar.gz
+cd zlib-1.3.1
+# Pass -fPIC via CFLAGS environment variable
+CFLAGS="-fPIC" ./configure --prefix="$DEPS_DIR" --static
+make -j"$NPROC"
+make install
+cd ..
+
 # Build xorg-macros (required by libXau, etc.)
 echo "Building xorg-macros..."
 git clone https://gitlab.freedesktop.org/xorg/util/macros.git
@@ -152,19 +163,42 @@ make -j"$NPROC"
 make install
 cd ..
 
+# --- FIXED X265 BUILD ---
 # Build x265
 echo "Building x265..."
 git clone https://bitbucket.org/multicoreware/x265_git.git
+mkdir -p x265_git/build
 cd x265_git/build
+
 cmake -G "Unix Makefiles" \
   -DENABLE_SHARED=OFF \
   -DENABLE_CLI=OFF \
   -DCMAKE_INSTALL_PREFIX="$DEPS_DIR" \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DNASM_EXECUTABLE="$DEPS_DIR/bin/nasm" \
   -DENABLE_PKGCONFIG=ON \
   ../source
+  
 make -j"$NPROC"
 make install
+
+# We add -lstdc++ to Libs.private so pkg-config can find it.
+echo "Manually creating x265.pc..."
+mkdir -p "$DEPS_DIR/lib/pkgconfig"
+tee "$DEPS_DIR/lib/pkgconfig/x265.pc" > /dev/null <<EOF
+prefix=$DEPS_DIR
+exec_prefix=\${prefix}
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
+
+Name: x265
+Description: H.265/HEVC video encoder
+Version: 3.5
+Libs: -L\${libdir} -lx265
+Libs.private: -lstdc++ -lpthread -ldl -lm
+Cflags: -I\${includedir}
+EOF
+
 cd ../../
 
 # Build OpenSSL (dependency for libsrt)
@@ -181,7 +215,8 @@ echo "Building libsrt..."
 git clone --depth 1 --branch v1.5.3 https://github.com/Haivision/srt.git
 cd srt
 mkdir -p build && cd build
-cmake -G "Unix Makefiles" \
+# Added -DENABLE_GCRYPT=OFF to force use of OpenSSL
+cmake .. -G "Unix Makefiles" \
   -DCMAKE_INSTALL_PREFIX="$DEPS_DIR" \
   -DENABLE_SHARED=OFF \
   -DENABLE_STATIC=ON \
@@ -189,7 +224,8 @@ cmake -G "Unix Makefiles" \
   -DENABLE_APPS=OFF \
   -DOPENSSL_USE_STATIC_LIBS=ON \
   -DOPENSSL_ROOT_DIR="$DEPS_DIR" \
-  -DCMAKE_PREFIX_PATH="$DEPS_DIR"
+  -DCMAKE_PREFIX_PATH="$DEPS_DIR" \
+  -DENABLE_GCRYPT=OFF
 make -j"$NPROC"
 make install
 cd ../..
@@ -199,7 +235,8 @@ echo "Building FFmpeg 6.1..."
 git clone --depth 1 --branch n6.1 https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_SRC"
 cd "$FFMPEG_SRC"
 
-# Note: PKG_CONFIG_PATH is set at the top of the script
+# --- FIXED FFMPEG CONFIGURE LINE ---
+# Corrected typo: $D_DIR -> $DEPS_DIR
 ./configure \
   --prefix="$FFMPEG_DIR" \
   --disable-shared \
@@ -220,6 +257,7 @@ cd "$FFMPEG_SRC"
   --extra-cflags="-fPIC -I$DEPS_DIR/include" \
   --extra-cxxflags="-fPIC -I$DEPS_DIR/include" \
   --extra-ldflags="-L$DEPS_DIR/lib -L$DEPS_DIR/lib64"
+# --- END OF FIX ---
 
 make -j"$NPROC"
 make install

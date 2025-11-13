@@ -19,7 +19,7 @@ use crate::client_video::ClientVideo;
 // Variables
 pub static PROCESSORS: OnceCell<RwLock<HashMap<String, Arc<SourceProcessor>>>> = OnceCell::const_new();
 pub static MAX_QUEUE_FRAMES: usize = 15;
-pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(1);
+pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Returns a source processor instance by given stream ID
 pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {
@@ -156,6 +156,7 @@ impl SourceStats {
 /// 2. inference_frame: How many frames we want to skip before performing inference. In other words, 
 /// "Inference on every N frame". This allows us to skip inference on frames when source has higher frame
 /// rate, having minimal effect on the end user's experience.
+#[allow(dead_code)]
 pub struct SourceProcessor {
     // Settings for multi-threading
     queue: Arc<FixedSizeQueue<Arc<RawFrame>>>,

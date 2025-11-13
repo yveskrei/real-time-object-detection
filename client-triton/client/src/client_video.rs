@@ -67,8 +67,6 @@ impl ClientVideo {
             Library::new("secrets/libclient_video.so")?
         };
 
-        println!("NIGGA");
-
         Ok(
             Self {
                 library

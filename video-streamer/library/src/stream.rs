@@ -245,32 +245,41 @@ struct VideoInfo {
 fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager: Arc<StreamManager>) -> Result<()> {
     log_info!("[Source {}] Connecting to SRT stream: {}", source_id, stream_url);
     
-    // For SRT streams, we need to add SRT-specific parameters in the URL itself
-    // rather than using dictionary options which don't work well with SRT protocol
-    let enhanced_url = if stream_url.contains('?') {
-        // URL already has parameters, append SRT options
-        format!("{}&timeout=10000000&latency=1000000&rcvbuf=12058624", stream_url)
-    } else {
-        // Add SRT parameters
-        format!("{}?mode=caller&timeout=10000000&latency=1000000&rcvbuf=12058624", stream_url)
-    };
+    // IMPORTANT: Don't modify the URL - pass options via dictionary like Python does
+    let connection_url = stream_url.to_string();
     
-    log_debug!(manager, "[Source {}] Enhanced SRT URL: {}", source_id, enhanced_url);
+    log_info!("[Source {}] Using URL: {}", source_id, connection_url);
     
-    // Use minimal dictionary options - most SRT options go in URL
+    // Set SRT options via dictionary (matching Python's approach)
     let mut input_opts = ffmpeg::Dictionary::new();
     
-    // Only set format-level options, not protocol options
-    // Protocol options for SRT must be in the URL
-    input_opts.set("analyzeduration", "5000000"); // 5 seconds (reduced for faster connection)
-    input_opts.set("probesize", "10000000"); // 10MB
+    // SRT protocol options (matching Python video_player.py)
+    // Only set these if they're NOT already in the URL
+    if !stream_url.contains("mode=") {
+        input_opts.set("mode", "caller");
+    }
+    input_opts.set("latency", "200000"); // 200ms - matching Python
+    input_opts.set("maxbw", "0");
+    input_opts.set("timeout", "5000000"); // 5 seconds
+    input_opts.set("connect_timeout", "5000000");
+    input_opts.set("rcvbuf", "48234496"); // Matching Python's buffer size
+    input_opts.set("sndbuf", "48234496");
+    input_opts.set("peerlatency", "0");
+    input_opts.set("tlpktdrop", "1");
+    input_opts.set("payload_size", "1316");
+    
+    // Format-level options
+    input_opts.set("analyzeduration", "2000000"); // 2 seconds
+    input_opts.set("probesize", "5000000"); // 5MB
+    input_opts.set("fflags", "nobuffer");
+    input_opts.set("flags", "low_delay");
     
     // Try to open with retries
     let mut last_error = None;
     for attempt in 1..=3 {
         log_info!("[Source {}] Connection attempt {}/3", source_id, attempt);
         
-        match ffmpeg::format::input_with_dictionary(&enhanced_url, input_opts.clone()) {
+        match ffmpeg::format::input_with_dictionary(&connection_url, input_opts.clone()) {
             Ok(mut ictx) => {
                 log_info!("[Source {}] Successfully connected to SRT stream", source_id);
                 return process_stream(source_id, &mut ictx, callbacks, manager);
@@ -469,13 +478,13 @@ fn process_stream(
 pub fn init_ffmpeg() -> Result<()> {
     // Set log level to quiet to suppress all FFmpeg logs
     unsafe {
-        ffmpeg_next::sys::av_log_set_level(ffmpeg_next::sys::AV_LOG_QUIET);
+        ffmpeg_next::sys::av_log_set_level(ffmpeg_next::sys::AV_LOG_VERBOSE);
     }
     
     ffmpeg::init().context("Failed to initialize FFmpeg")?;
     
     // Set again after init to be sure
-    ffmpeg::log::set_level(ffmpeg::log::Level::Quiet);
+    // ffmpeg::log::set_level(ffmpeg::log::Level::Quiet);
     
     log_info!("FFmpeg Initialized successfully");
     Ok(())

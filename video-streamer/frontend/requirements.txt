@@ -1,5 +1,7 @@
 PyQt6==6.7.1
 requests==2.31.0
+# Build PyAV from source to get SRT protocol support from system FFmpeg
+--no-binary av
 av==16.0.1
 numpy==1.26.3
 websocket-client==1.7.0
