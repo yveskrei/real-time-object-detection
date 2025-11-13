@@ -12,7 +12,7 @@ use crate::{SourceFramesCallback, SourceStoppedCallback, SourceNameCallback, Sou
 use crate::{log_info, log_error, log_debug};
 
 // Stream timeout constant
-const STREAM_TIMEOUT: Duration = Duration::from_secs(5);
+const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Logging level for C FFI
 #[repr(i32)]
@@ -243,21 +243,60 @@ struct VideoInfo {
 }
 
 fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager: Arc<StreamManager>) -> Result<()> {
-    // Set input options for UDP stream
+    log_info!("[Source {}] Connecting to SRT stream: {}", source_id, stream_url);
+    
+    // For SRT streams, we need to add SRT-specific parameters in the URL itself
+    // rather than using dictionary options which don't work well with SRT protocol
+    let enhanced_url = if stream_url.contains('?') {
+        // URL already has parameters, append SRT options
+        format!("{}&timeout=10000000&latency=1000000&rcvbuf=12058624", stream_url)
+    } else {
+        // Add SRT parameters
+        format!("{}?mode=caller&timeout=10000000&latency=1000000&rcvbuf=12058624", stream_url)
+    };
+    
+    log_debug!(manager, "[Source {}] Enhanced SRT URL: {}", source_id, enhanced_url);
+    
+    // Use minimal dictionary options - most SRT options go in URL
     let mut input_opts = ffmpeg::Dictionary::new();
-    input_opts.set("analyzeduration", "10000000"); // 10 seconds
-    input_opts.set("probesize", "50000000"); // 50MB
-    input_opts.set("fflags", "nobuffer"); // Reduce latency
-    input_opts.set("max_delay", "0"); // Minimum delay
     
-    // Convert Duration to microseconds for FFmpeg
-    let timeout_micros = (STREAM_TIMEOUT.as_secs() * 1_000_000).to_string();
-    input_opts.set("timeout", &timeout_micros);
-    input_opts.set("rw_timeout", &timeout_micros);
+    // Only set format-level options, not protocol options
+    // Protocol options for SRT must be in the URL
+    input_opts.set("analyzeduration", "5000000"); // 5 seconds (reduced for faster connection)
+    input_opts.set("probesize", "10000000"); // 10MB
     
-    let mut ictx = ffmpeg::format::input_with_dictionary(&stream_url, input_opts)
-        .context("Failed to open stream")?;
+    // Try to open with retries
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        log_info!("[Source {}] Connection attempt {}/3", source_id, attempt);
+        
+        match ffmpeg::format::input_with_dictionary(&enhanced_url, input_opts.clone()) {
+            Ok(mut ictx) => {
+                log_info!("[Source {}] Successfully connected to SRT stream", source_id);
+                return process_stream(source_id, &mut ictx, callbacks, manager);
+            }
+            Err(e) => {
+                last_error = Some(e);
+                log_error!("[Source {}] Connection attempt {} failed: {}", 
+                          source_id, attempt, last_error.as_ref().unwrap());
+                
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+        }
+    }
+    
+    // All attempts failed
+    Err(last_error.unwrap()).context("Failed to open SRT stream after 3 attempts")
+}
 
+fn process_stream(
+    source_id: i32,
+    ictx: &mut ffmpeg::format::context::Input,
+    callbacks: Callbacks,
+    manager: Arc<StreamManager>,
+) -> Result<()> {
     let input = ictx
         .streams()
         .best(ffmpeg::media::Type::Video)
@@ -283,14 +322,25 @@ fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager
         .video()
         .context("Failed to create video decoder")?;
 
-    // Wait a bit and try to decode first packet to get actual frame parameters
-    log_debug!(manager, "[Source {}] Waiting for first frame to determine dimensions...", source_id);
+    // Wait for first keyframe and decode it
+    log_debug!(manager, "[Source {}] Waiting for keyframe to determine dimensions...", source_id);
     
     let mut first_frame = ffmpeg::util::frame::video::Video::empty();
     let mut got_first_frame = false;
+    let mut waiting_for_keyframe = true;
     
     for (stream, packet) in ictx.packets() {
         if stream.index() == video_stream_index {
+            // Wait for keyframe before starting decode
+            if waiting_for_keyframe && !packet.is_key() {
+                continue;
+            }
+            
+            if waiting_for_keyframe {
+                waiting_for_keyframe = false;
+                log_debug!(manager, "[Source {}] Found keyframe, starting decode...", source_id);
+            }
+            
             if decoder.send_packet(&packet).is_ok() {
                 if decoder.receive_frame(&mut first_frame).is_ok() {
                     got_first_frame = true;
@@ -319,11 +369,12 @@ fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager
         anyhow::bail!("Invalid frame dimensions: {}x{}", width, height);
     }
 
+    // Create scaler to convert to RGB24 (matching Python's rgb24 format)
     let mut scaler = ffmpeg::software::scaling::context::Context::get(
         format,
         width,
         height,
-        ffmpeg::format::Pixel::RGB24,
+        ffmpeg::format::Pixel::RGB24,  // Output format: rgb24
         width,
         height,
         ffmpeg::software::scaling::Flags::BILINEAR,
@@ -342,17 +393,41 @@ fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager
     }
 
     let mut last_pts: Option<i64> = first_frame.pts();
+    let mut frame_received = true;
+    waiting_for_keyframe = false;
 
+    // Continue processing remaining frames
     for (stream, packet) in ictx.packets() {
         if stream.index() == video_stream_index {
-            if let Err(e) = decoder.send_packet(&packet) {
-                log_error!("[Source {}] Error sending packet: {}", source_id, e);
+            // If we lost frames, wait for next keyframe
+            if waiting_for_keyframe && !packet.is_key() {
                 continue;
+            }
+            
+            if let Err(e) = decoder.send_packet(&packet) {
+                if !frame_received {
+                    // If we haven't received any frame yet, wait for keyframe
+                    waiting_for_keyframe = true;
+                    continue;
+                } else {
+                    log_error!("[Source {}] Error sending packet: {}", source_id, e);
+                    continue;
+                }
+            }
+
+            if waiting_for_keyframe {
+                waiting_for_keyframe = false;
+                log_debug!(manager, "[Source {}] Found keyframe after error, resuming decode...", source_id);
             }
 
             let mut decoded_frame = ffmpeg::util::frame::video::Video::empty();
             
             while decoder.receive_frame(&mut decoded_frame).is_ok() {
+                if !frame_received {
+                    log_info!("[Source {}] First frame received!", source_id);
+                    frame_received = true;
+                }
+                
                 let mut rgb_frame = ffmpeg::util::frame::video::Video::empty();
                 
                 if let Err(e) = scaler.run(&decoded_frame, &mut rgb_frame) {
@@ -360,12 +435,12 @@ fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager
                     continue;
                 }
 
-                // Get PTS - raw value from stream
+                // Get PTS - raw value from stream (matching Python behavior)
                 let pts = decoded_frame.pts().unwrap_or(0);
                 
                 // Check for pts progression issues
                 if let Some(last) = last_pts {
-                    if pts <= last {
+                    if pts <= last && pts != 0 {
                         // Stream might have looped or issues
                         log_debug!(manager, "[Source {}] PTS reset detected (last: {}, current: {})", 
                                 source_id, last, pts);
@@ -377,7 +452,7 @@ fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager
                 let height = rgb_frame.height() as i32;
                 let data_ptr = rgb_frame.data(0).as_ptr();
 
-                // Call frames callback with raw PTS
+                // Call frames callback with raw PTS (matching Python behavior)
                 (callbacks.source_frames)(source_id, data_ptr, width, height, pts as u64);
             }
         }

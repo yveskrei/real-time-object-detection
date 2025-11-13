@@ -205,7 +205,7 @@ class ManagementTab(QWidget):
             QMessageBox.information(
                 self,
                 "Stream Started",
-                f"Stream started!\nURL: {result['stream_url']}\nVLC: {result.get('vlc_command', '')}"
+                f"Stream started!\nPort: {result['port']}\nPID: {result.get('pid', 'N/A')}"
             )
             self.refresh_videos()
         except Exception as e:

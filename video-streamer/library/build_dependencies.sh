@@ -167,6 +167,33 @@ make -j"$NPROC"
 make install
 cd ../../
 
+# Build OpenSSL (dependency for libsrt)
+echo "Building OpenSSL..."
+git clone --depth 1 --branch openssl-3.1.4 https://github.com/openssl/openssl.git
+cd openssl
+./config --prefix="$DEPS_DIR" --openssldir="$DEPS_DIR/ssl" no-shared no-tests -fPIC
+make -j"$NPROC"
+make install_sw
+cd ..
+
+# Build libsrt
+echo "Building libsrt..."
+git clone --depth 1 --branch v1.5.3 https://github.com/Haivision/srt.git
+cd srt
+mkdir -p build && cd build
+cmake -G "Unix Makefiles" \
+  -DCMAKE_INSTALL_PREFIX="$DEPS_DIR" \
+  -DENABLE_SHARED=OFF \
+  -DENABLE_STATIC=ON \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DENABLE_APPS=OFF \
+  -DOPENSSL_USE_STATIC_LIBS=ON \
+  -DOPENSSL_ROOT_DIR="$DEPS_DIR" \
+  -DCMAKE_PREFIX_PATH="$DEPS_DIR"
+make -j"$NPROC"
+make install
+cd ../..
+
 # Build FFmpeg 6.1
 echo "Building FFmpeg 6.1..."
 git clone --depth 1 --branch n6.1 https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_SRC"
@@ -188,6 +215,8 @@ cd "$FFMPEG_SRC"
   --enable-libvpx \
   --enable-libopus \
   --enable-libmp3lame \
+  --enable-openssl \
+  --enable-libsrt \
   --extra-cflags="-fPIC -I$DEPS_DIR/include" \
   --extra-cxxflags="-fPIC -I$DEPS_DIR/include" \
   --extra-ldflags="-L$DEPS_DIR/lib -L$DEPS_DIR/lib64"

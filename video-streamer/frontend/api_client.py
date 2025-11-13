@@ -6,6 +6,24 @@ class APIClient:
     
     def __init__(self, base_url: str):
         self.base_url = base_url
+        # Extract host from base_url for SRT URL construction
+        self.host = self._extract_host(base_url)
+    
+    def _extract_host(self, url: str) -> str:
+        """Extract host from URL (e.g., 'http://192.168.1.100:8000' -> '192.168.1.100')"""
+        # Remove protocol
+        host = url.replace('http://', '').replace('https://', '')
+        # Remove port if present
+        if ':' in host:
+            host = host.split(':')[0]
+        # Remove any trailing path
+        if '/' in host:
+            host = host.split('/')[0]
+        return host
+    
+    def get_srt_url(self, port: int) -> str:
+        """Construct SRT URL from backend host and port"""
+        return f"srt://{self.host}:{port}"
     
     def upload_video(self, file_path: str, name: str) -> dict:
         """Upload a video file"""
@@ -35,7 +53,13 @@ class APIClient:
         return response.json()
     
     def start_stream(self, video_id: int, output_format: str = "mpegts", resolution: str = None) -> dict:
-        """Start streaming a video"""
+        """
+        Start streaming a video
+        
+        Returns:
+            dict with keys: video_id, status, port, stream_start_time_ms, pid
+            Use get_srt_url(response['port']) to construct the SRT URL
+        """
         data = {"video_id": video_id, "output_format": output_format}
         if resolution:
             data["resolution"] = resolution
@@ -50,7 +74,13 @@ class APIClient:
         return response.json()
     
     def get_stream_status(self, video_id: int) -> dict:
-        """Get stream status"""
+        """
+        Get stream status
+        
+        Returns:
+            dict with keys: video_id, is_streaming, port (if streaming), stream_start_time_ms, pid
+            Use get_srt_url(response['port']) to construct the SRT URL
+        """
         response = requests.get(f"{self.base_url}/streams/status/{video_id}")
         response.raise_for_status()
         return response.json()

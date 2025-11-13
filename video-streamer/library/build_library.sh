@@ -27,7 +27,7 @@ export RUSTFLAGS="-C link-args=-Wl,--whole-archive \
 -L$FFMPEG_DIR/lib -lavcodec -lavformat -lavutil -lavfilter -lswscale -lswresample -lpostproc \
 -L$DEPS_DIR/lib -lx264 -lx265 -lvpx -lopus -lmp3lame \
 -Wl,--no-whole-archive \
--L$DEPS_DIR/lib -lxcb -lxcb-shm -lxcb-shape -lxcb-xfixes -lXau -lXdmcp -llzma -lbz2 \
+-L$DEPS_DIR/lib -lsrt -lssl -lcrypto -lxcb -lxcb-shm -lxcb-shape -lxcb-xfixes -lXau -lXdmcp -llzma -lbz2 \
 -lstdc++ -lm -lz -lpthread -ldl"
 
 cargo clean

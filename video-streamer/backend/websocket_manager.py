@@ -71,23 +71,16 @@ class ConnectionManager:
         return len(self.active_connections.get(video_id, set()))
     
     async def send_stream_info(self, websocket: WebSocket, video_id: int):
-        """Send initial stream information to newly connected client"""
-        if video_id not in storage.active_streams:
+        """Send stream info to client"""
+        if video_id in storage.active_streams:
+            stream_data = storage.active_streams[video_id]
             await websocket.send_json({
-                "type": "error",
-                "message": f"Stream {video_id} is not active"
+                "type": "stream_info",
+                "video_id": video_id,
+                "port": stream_data['srt_port'],
+                "stream_start_time_ms": stream_data['start_time_ms'],
+                "message": "Connected to stream"
             })
-            return
-        
-        stream_data = storage.active_streams[video_id]
-        
-        await websocket.send_json({
-            "type": "stream_info",
-            "video_id": video_id,
-            "stream_start_time_ms": stream_data['start_time_ms'],
-            "stream_url": f"udp://{stream_data['multicast_addr']}:{stream_data['port']}",
-            "message": "Connected to stream"
-        })
 
 # Global connection manager
 manager = ConnectionManager()
