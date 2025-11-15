@@ -5,11 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use reqwest::Url;
 
-use crate::player_proxy::PlayerSession;
+use crate::player_proxy::{PlayerSession, RawStreamInfo};
 use crate::TOKIO_RUNTIME;
 use crate::{SourceFramesCallback, SourceStoppedCallback, SourceNameCallback, SourceStatusCallback};
-use crate::{log_info, log_error, log_debug};
+use crate::{log_info, log_error, log_debug}; // log_debug now uses static state
 
 // Stream timeout constant
 const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,6 +39,7 @@ pub struct StreamManager {
     streams: Mutex<HashMap<i32, JoinHandle<()>>>,
     callbacks: Mutex<Option<Callbacks>>,
     player_session: PlayerSession,
+    // This is the static log level you wanted
     pub log_level: Mutex<LogLevel>,
 }
 
@@ -104,7 +106,16 @@ impl StreamManager {
         let manager = Arc::clone(&STREAM_MANAGER);
         
         let handle = TOKIO_RUNTIME.spawn(async move {
-            log_debug!(manager, "[Source {}] Starting monitor task", source_id);
+            // UPDATED: log_debug no longer needs 'manager'
+            log_debug!("[Source {}] Starting monitor task", source_id);
+            
+            // Get host from base_url. Assumes backend is on same host.
+            let host = match Url::parse(manager.player_session.base_url()) {
+                Ok(url) => url.host_str().unwrap_or("127.0.0.1").to_string(),
+                Err(_) => "127.0.0.1".to_string(),
+            };
+            
+            log_debug!("[Source {}] Using backend host: {}", source_id, host);
             
             loop {
                 // Check if we have callbacks registered
@@ -117,7 +128,6 @@ impl StreamManager {
                         }
                         Some(cbs) => Some(cbs)
                     }
-                    // cb_lock is dropped here automatically at end of scope
                 };
                 
                 let callbacks = match callbacks {
@@ -138,10 +148,12 @@ impl StreamManager {
                             continue;
                         }
 
-                        let stream_url = match status.stream_url {
-                            Some(url) => url,
+                        // UPDATED: Get raw stream info from 'udp' block
+                        let raw_stream_info = match status.udp {
+                            Some(info) => info,
                             None => {
-                                log_error!("[Source {}] No stream URL available", source_id);
+                                // UPDATED: Log message
+                                log_error!("[Source {}] No raw stream info ('udp' block) available from backend", source_id);
                                 (callbacks.source_status)(source_id, SourceStatus::ConnectionError as i32);
                                 sleep(STREAM_TIMEOUT).await;
                                 continue;
@@ -155,11 +167,14 @@ impl StreamManager {
                             (callbacks.source_name)(source_id, name_cstr.into_raw());
                         }
 
-                        log_info!("[Source {}] Stream active, connecting to {}", source_id, stream_url);
+                        // UPDATED: Log for UDP
+                        log_info!("[Source {}] Stream active, connecting to udp://{}:{}", 
+                                 source_id, host, raw_stream_info.port);
                         (callbacks.source_status)(source_id, SourceStatus::Ok as i32);
 
                         // Start consuming stream
-                        if let Err(e) = manager.consume_stream(source_id, &stream_url, callbacks).await {
+                        // CHANGED: Pass host
+                        if let Err(e) = manager.consume_stream(source_id, raw_stream_info.clone(), host.clone(), callbacks).await {
                             log_error!("[Source {}] Stream error: {}", source_id, e);
                             (callbacks.source_stopped)(source_id);
                         }
@@ -171,7 +186,7 @@ impl StreamManager {
                 }
 
                 // Wait before retry
-                log_debug!(manager, "[Source {}] Retrying in {:?}...", source_id, STREAM_TIMEOUT);
+                log_debug!("[Source {}] Retrying in {:?}...", source_id, STREAM_TIMEOUT);
                 sleep(STREAM_TIMEOUT).await;
             }
         });
@@ -189,10 +204,10 @@ impl StreamManager {
     async fn consume_stream(
         &self,
         source_id: i32,
-        stream_url: &str,
+        stream_info: RawStreamInfo,
+        host: String,
         callbacks: Callbacks,
     ) -> Result<()> {
-        let stream_url = stream_url.to_string();
         let session = self.player_session.clone();
         
         // Spawn a task to periodically check if stream is still active on backend
@@ -214,10 +229,11 @@ impl StreamManager {
             }
         });
         
-        let manager = Arc::clone(&STREAM_MANAGER);
         // Spawn blocking task for FFmpeg operations
         let mut decode_handle = tokio::task::spawn_blocking(move || {
-            if let Err(e) = decode_stream(source_id, &stream_url, callbacks, manager) {
+            // CHANGED: Pass stream_info and host
+            // Note: 'manager' is no longer needed here for logging
+            if let Err(e) = decode_stream(source_id, stream_info, host, callbacks) {
                 log_error!("[Source {}] Decode error: {}", source_id, e);
                 (callbacks.source_status)(source_id, SourceStatus::DecodeError as i32);
             }
@@ -242,53 +258,39 @@ struct VideoInfo {
     pub name: String,
 }
 
-fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager: Arc<StreamManager>) -> Result<()> {
-    log_info!("[Source {}] Connecting to SRT stream: {}", source_id, stream_url);
-    
-    // IMPORTANT: Don't modify the URL - pass options via dictionary like Python does
-    let connection_url = stream_url.to_string();
-    
-    log_info!("[Source {}] Using URL: {}", source_id, connection_url);
-    
-    // Set SRT options via dictionary (matching Python's approach)
+fn decode_stream(
+    source_id: i32, 
+    stream_info: RawStreamInfo, 
+    host: String,
+    callbacks: Callbacks, 
+) -> Result<()> {
+    // UPDATED: Connect to UDP stream
+    let connection_url = format!("udp://{}:{}", host, stream_info.port);
+
+    log_info!("[Source {}] Connecting to UDP stream: {}", source_id, connection_url);
+
+    // UPDATED: Removed rawvideo options, added options for UDP/MPEGTS
     let mut input_opts = ffmpeg::Dictionary::new();
-    
-    // SRT protocol options (matching Python video_player.py)
-    // Only set these if they're NOT already in the URL
-    if !stream_url.contains("mode=") {
-        input_opts.set("mode", "caller");
-    }
-    input_opts.set("latency", "200000"); // 200ms - matching Python
-    input_opts.set("maxbw", "0");
-    input_opts.set("timeout", "5000000"); // 5 seconds
-    input_opts.set("connect_timeout", "5000000");
-    input_opts.set("rcvbuf", "48234496"); // Matching Python's buffer size
-    input_opts.set("sndbuf", "48234496");
-    input_opts.set("peerlatency", "0");
-    input_opts.set("tlpktdrop", "1");
-    input_opts.set("payload_size", "1316");
-    
-    // Format-level options
-    input_opts.set("analyzeduration", "2000000"); // 2 seconds
-    input_opts.set("probesize", "5000000"); // 5MB
+    input_opts.set("analyzeduration", "500000"); // 0.5s
+    input_opts.set("probesize", "500000"); // 500KB
     input_opts.set("fflags", "nobuffer");
     input_opts.set("flags", "low_delay");
-    
-    // Try to open with retries
+    // We let FFmpeg auto-detect format (mpegts) and codec (h264)
+
     let mut last_error = None;
     for attempt in 1..=3 {
         log_info!("[Source {}] Connection attempt {}/3", source_id, attempt);
-        
+
+        // We pass options, but don't force rawvideo
         match ffmpeg::format::input_with_dictionary(&connection_url, input_opts.clone()) {
             Ok(mut ictx) => {
-                log_info!("[Source {}] Successfully connected to SRT stream", source_id);
-                return process_stream(source_id, &mut ictx, callbacks, manager);
+                log_info!("[Source {}] Successfully connected to UDP stream", source_id);
+                // process_stream will decode, scale to RGB24, and call callbacks
+                return process_stream(source_id, &mut ictx, callbacks);
             }
             Err(e) => {
                 last_error = Some(e);
-                log_error!("[Source {}] Connection attempt {} failed: {}", 
-                          source_id, attempt, last_error.as_ref().unwrap());
-                
+                log_error!("[Source {}] Connection attempt {} failed: {}", source_id, attempt, last_error.as_ref().unwrap());
                 if attempt < 3 {
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
@@ -296,15 +298,15 @@ fn decode_stream(source_id: i32, stream_url: &str, callbacks: Callbacks, manager
         }
     }
     
-    // All attempts failed
-    Err(last_error.unwrap()).context("Failed to open SRT stream after 3 attempts")
+    // UPDATED: Error message
+    Err(last_error.unwrap()).context(format!("Failed to open UDP stream after 3 attempts"))
 }
 
+// This function decodes the mpegts/h264 stream and scales it to RGB24
 fn process_stream(
     source_id: i32,
     ictx: &mut ffmpeg::format::context::Input,
     callbacks: Callbacks,
-    manager: Arc<StreamManager>,
 ) -> Result<()> {
     let input = ictx
         .streams()
@@ -321,7 +323,8 @@ fn process_stream(
         0.0
     };
     
-    log_debug!(manager, "[Source {}] Found video stream, attempting to decode...", source_id);
+    // UPDATED: log_debug uses static log level
+    log_debug!("[Source {}] Found video stream, attempting to decode...", source_id);
 
     let context_decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())
         .context("Failed to create codec context")?;
@@ -331,24 +334,13 @@ fn process_stream(
         .video()
         .context("Failed to create video decoder")?;
 
-    // Wait for first keyframe and decode it
-    log_debug!(manager, "[Source {}] Waiting for keyframe to determine dimensions...", source_id);
+    log_debug!("[Source {}] Waiting for first frame from stream...", source_id);
     
     let mut first_frame = ffmpeg::util::frame::video::Video::empty();
     let mut got_first_frame = false;
-    let mut waiting_for_keyframe = true;
     
     for (stream, packet) in ictx.packets() {
         if stream.index() == video_stream_index {
-            // Wait for keyframe before starting decode
-            if waiting_for_keyframe && !packet.is_key() {
-                continue;
-            }
-            
-            if waiting_for_keyframe {
-                waiting_for_keyframe = false;
-                log_debug!(manager, "[Source {}] Found keyframe, starting decode...", source_id);
-            }
             
             if decoder.send_packet(&packet).is_ok() {
                 if decoder.receive_frame(&mut first_frame).is_ok() {
@@ -365,22 +357,22 @@ fn process_stream(
     
     let width = first_frame.width();
     let height = first_frame.height();
+    // This format will be YUV420P (or similar), which is correct for the stream
     let format = first_frame.format();
     
-    let is_debug = *manager.log_level.lock().unwrap() == LogLevel::Debug;
-    
-    if is_debug {
+    // UPDATED: log_debug uses static log level
+    if *STREAM_MANAGER.log_level.lock().unwrap() == LogLevel::Debug {
         log_info!("[Source {}] Got response from stream ({}x{}), {:.2} FPS, format: {:?}", 
                  source_id, width, height, fps_float, format);
     }
     
     if width == 0 || height == 0 {
-        anyhow::bail!("Invalid frame dimensions: {}x{}", width, height);
+        anyhow::bail!("Invalid frame dimensions from ffmpeg: {}x{}", width, height);
     }
 
-    // Create scaler to convert to RGB24 (matching Python's rgb24 format)
+    // Create scaler to convert from stream format (e.g., YUV420P) to RGB24
     let mut scaler = ffmpeg::software::scaling::context::Context::get(
-        format,
+        format, // Input format from stream
         width,
         height,
         ffmpeg::format::Pixel::RGB24,  // Output format: rgb24
@@ -395,6 +387,7 @@ fn process_stream(
     if scaler.run(&first_frame, &mut rgb_frame).is_ok() {
         let pts = first_frame.pts().unwrap_or(0);
         let data_ptr = rgb_frame.data(0).as_ptr();
+        // Callback with RGB24 frame data
         (callbacks.source_frames)(source_id, data_ptr, width as i32, height as i32, pts as u64);
         
         log_info!("[Source {}] Started receiving frames ({}x{}), PTS: {}", 
@@ -402,56 +395,34 @@ fn process_stream(
     }
 
     let mut last_pts: Option<i64> = first_frame.pts();
-    let mut frame_received = true;
-    waiting_for_keyframe = false;
 
     // Continue processing remaining frames
     for (stream, packet) in ictx.packets() {
         if stream.index() == video_stream_index {
-            // If we lost frames, wait for next keyframe
-            if waiting_for_keyframe && !packet.is_key() {
-                continue;
-            }
             
             if let Err(e) = decoder.send_packet(&packet) {
-                if !frame_received {
-                    // If we haven't received any frame yet, wait for keyframe
-                    waiting_for_keyframe = true;
-                    continue;
-                } else {
-                    log_error!("[Source {}] Error sending packet: {}", source_id, e);
-                    continue;
-                }
-            }
-
-            if waiting_for_keyframe {
-                waiting_for_keyframe = false;
-                log_debug!(manager, "[Source {}] Found keyframe after error, resuming decode...", source_id);
+                log_error!("[Source {}] Error sending packet: {}", source_id, e);
+                break;
             }
 
             let mut decoded_frame = ffmpeg::util::frame::video::Video::empty();
             
             while decoder.receive_frame(&mut decoded_frame).is_ok() {
-                if !frame_received {
-                    log_info!("[Source {}] First frame received!", source_id);
-                    frame_received = true;
-                }
                 
                 let mut rgb_frame = ffmpeg::util::frame::video::Video::empty();
                 
+                // Scale to RGB24
                 if let Err(e) = scaler.run(&decoded_frame, &mut rgb_frame) {
                     log_error!("[Source {}] Scaling error: {}", source_id, e);
                     continue;
                 }
 
-                // Get PTS - raw value from stream (matching Python behavior)
+                // Get PTS - raw value from stream
                 let pts = decoded_frame.pts().unwrap_or(0);
                 
-                // Check for pts progression issues
                 if let Some(last) = last_pts {
                     if pts <= last && pts != 0 {
-                        // Stream might have looped or issues
-                        log_debug!(manager, "[Source {}] PTS reset detected (last: {}, current: {})", 
+                        log_debug!("[Source {}] PTS issue detected (last: {}, current: {})", 
                                 source_id, last, pts);
                     }
                 }
@@ -461,7 +432,7 @@ fn process_stream(
                 let height = rgb_frame.height() as i32;
                 let data_ptr = rgb_frame.data(0).as_ptr();
 
-                // Call frames callback with raw PTS (matching Python behavior)
+                // Call frames callback with RGB24 data
                 (callbacks.source_frames)(source_id, data_ptr, width, height, pts as u64);
             }
         }
@@ -476,15 +447,12 @@ fn process_stream(
 
 /// Initialize FFmpeg library (call once at startup)
 pub fn init_ffmpeg() -> Result<()> {
-    // Set log level to quiet to suppress all FFmpeg logs
     unsafe {
-        ffmpeg_next::sys::av_log_set_level(ffmpeg_next::sys::AV_LOG_VERBOSE);
+        // Setting a less verbose log level
+        ffmpeg_next::sys::av_log_set_level(ffmpeg_next::sys::AV_LOG_ERROR);
     }
     
     ffmpeg::init().context("Failed to initialize FFmpeg")?;
-    
-    // Set again after init to be sure
-    // ffmpeg::log::set_level(ffmpeg::log::Level::Quiet);
     
     log_info!("FFmpeg Initialized successfully");
     Ok(())

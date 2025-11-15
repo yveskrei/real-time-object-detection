@@ -3,16 +3,42 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use anyhow::{Context, Result};
 
+// Info for the raw video stream (backend provides this in 'udp' field)
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RawStreamInfo {
+    // Made protocol and host optional to match the backend's response.
+    pub protocol: Option<String>,
+    pub host: Option<String>,
+    pub port: u16,
+    pub width: u32,
+    pub height: u32,
+    pub pix_fmt: String, // Note: Backend *says* rgb24 but *streams* yuv420p
+    pub fps: f64,
+    pub bytes_per_pixel: u16,
+    pub frame_size_bytes: u32,
+}
+
+// Info for the DASH stream
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DashInfo {
+    pub manifest_url: String,
+}
+
 // Response models matching the backend
 #[derive(Debug, Deserialize, Serialize)]
 pub struct StreamStatus {
     pub video_id: i32,
     pub is_streaming: bool,
-    pub stream_url: Option<String>,
     pub stream_start_time_ms: Option<i64>,
-    pub vlc_command: Option<String>,
     pub pid: Option<i32>,
     pub error: Option<String>,
+    pub clients: Option<i32>,
+    pub status: Option<String>,
+    
+    // CHANGED: Renamed 'tcp' to 'udp' to match python backend response
+    pub udp: Option<RawStreamInfo>, // This field holds raw stream (UDP) info
+    
+    pub dash: Option<DashInfo>,
 }
 
 /// HTTP session for communicating with the player backend

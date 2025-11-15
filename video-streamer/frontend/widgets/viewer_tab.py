@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox,
-    QLabel, QMessageBox, QGridLayout, QDoubleSpinBox, QSpinBox,
+    QLabel, QMessageBox, QDoubleSpinBox, QSpinBox,
     QFrame
 )
 from PyQt6.QtCore import QTimer, Qt
@@ -8,29 +8,27 @@ from widgets.video_player import VideoPlayerWidget
 from typing import Optional
 
 class ViewerTab(QWidget):
-    """Tab for viewing one active stream at a time with WebSocket support"""
     
     def __init__(self, api_client, backend_url: str, parent=None):
         super().__init__(parent)
         self.api_client = api_client
-        self.backend_url = backend_url  # Store backend URL for WebSocket connections
+        self.backend_url = backend_url
         self.active_player: Optional[VideoPlayerWidget] = None
         self.setup_ui()
         
-        # Auto-refresh active streams every 5 seconds
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.refresh_streams)
         self.refresh_timer.start(5000)
     
     def setup_ui(self):
-        """Setup the viewer UI"""
         layout = QVBoxLayout(self)
         
-        # Top controls row
         controls = QHBoxLayout()
-        
-        # Left side - Stream selection
-        controls.addWidget(QLabel("Select Stream to Watch:"))
+
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_btn.clicked.connect(self.refresh_streams)
+        controls.addWidget(self.refresh_btn)
         
         self.stream_combo = QComboBox()
         self.stream_combo.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -42,17 +40,12 @@ class ViewerTab(QWidget):
         self.add_stream_btn.clicked.connect(self.add_stream_player)
         controls.addWidget(self.add_stream_btn)
         
-        refresh_btn = QPushButton("Refresh Streams")
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.refresh_streams)
-        controls.addWidget(refresh_btn)
-        
-        # Spacer to push right-side controls to the right
         controls.addStretch()
         
-        # Right side - Confidence control, retention control, and hide bboxes button
-        controls.addWidget(QLabel("Min Confidence:"))
-        
+        self.confidence_spinner_label = QLabel("Min Confidence:")
+        self.confidence_spinner_label.setVisible(False)
+        controls.addWidget(self.confidence_spinner_label)
+
         self.confidence_spinner = QDoubleSpinBox()
         self.confidence_spinner.setRange(0.0, 1.0)
         self.confidence_spinner.setSingleStep(0.05)
@@ -63,11 +56,13 @@ class ViewerTab(QWidget):
         self.confidence_spinner.setFixedWidth(80)
         self.confidence_spinner.valueChanged.connect(self.on_confidence_changed)
         self.confidence_spinner.setToolTip("Set minimum confidence threshold for displaying bounding boxes")
+        self.confidence_spinner.setVisible(False)
         controls.addWidget(self.confidence_spinner)
         
-        # BBOX Retention control
-        controls.addWidget(QLabel("BBOX Retention:"))
-        
+        self.retention_spinner_label = QLabel("BBOX Retention:")
+        self.retention_spinner_label.setVisible(False)
+        controls.addWidget(self.retention_spinner_label)
+
         self.retention_spinner = QSpinBox()
         self.retention_spinner.setRange(1, 30)
         self.retention_spinner.setSingleStep(1)
@@ -77,6 +72,7 @@ class ViewerTab(QWidget):
         self.retention_spinner.setFixedWidth(80)
         self.retention_spinner.valueChanged.connect(self.on_retention_changed)
         self.retention_spinner.setToolTip("Number of frames to retain bounding boxes on screen")
+        self.retention_spinner.setVisible(False)
         controls.addWidget(self.retention_spinner)
         
         self.hide_bboxes_btn = QPushButton("Hide BBoxes")
@@ -84,53 +80,68 @@ class ViewerTab(QWidget):
         self.hide_bboxes_btn.setCheckable(True)
         self.hide_bboxes_btn.clicked.connect(self.toggle_all_bboxes)
         self.hide_bboxes_btn.setToolTip("Toggle visibility of all bounding boxes")
+        self.hide_bboxes_btn.setVisible(False)
         controls.addWidget(self.hide_bboxes_btn)
         
         layout.addLayout(controls)
         
-        # Container for the *single* video player
         self.player_container = QWidget()
         self.player_container_layout = QVBoxLayout(self.player_container)
         self.player_container_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Add a styled frame to hold the player
+        # Label to show when no streams are active
+        self.no_streams_label = QLabel("No active streams available.")
+        self.no_streams_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = self.no_streams_label.font()
+        font.setPointSize(16)
+        self.no_streams_label.setFont(font)
+        self.no_streams_label.setStyleSheet("color: #888;")
+        # Add with stretch 1, so it fills the space (or shares with player)
+        self.player_container_layout.addWidget(self.no_streams_label, 1, Qt.AlignmentFlag.AlignCenter)
+        self.no_streams_label.setVisible(False) # Initially hidden
+        
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
         frame.setLayout(self.player_container_layout)
         
-        # Add the frame with a stretch factor of 1 to fill vertical space
         layout.addWidget(frame, 1)
         
-        # Removed layout.addStretch() which was causing the issue
-        
-        # Initial refresh
         self.refresh_streams()
+
+    def update_stream_availability_ui(self):
+        """Updates the UI state based on stream availability and player status."""
+        has_streams = self.stream_combo.count() > 0
+        is_player_active = self.active_player is not None
+
+        # Show "No streams" message only if no streams AND no player
+        self.no_streams_label.setVisible(not has_streams and not is_player_active)
+        
+        # Enable "Start Stream" only if streams available AND no player
+        self.add_stream_btn.setEnabled(has_streams and not is_player_active)
+        
+        # Enable combo box and refresh button only if no player
+        self.stream_combo.setEnabled(has_streams and not is_player_active)
+        self.refresh_btn.setEnabled(not is_player_active)
     
     def on_confidence_changed(self, value: float):
-        """Update confidence threshold for the active player"""
         if self.active_player and hasattr(self.active_player, 'bbox_overlay'):
             self.active_player.bbox_overlay.set_min_confidence(value)
     
     def on_retention_changed(self, value: int):
-        """Update bbox retention for the active player"""
         if self.active_player and hasattr(self.active_player, 'bbox_overlay'):
             self.active_player.bbox_overlay.set_bbox_retention(value)
     
     def toggle_all_bboxes(self, checked: bool):
-        """Toggle bbox visibility for the active player"""
         if self.active_player and hasattr(self.active_player, 'bbox_overlay'):
             self.active_player.bbox_overlay.toggle_visibility(not checked)
         
-        # Update button text
         self.hide_bboxes_btn.setText("Show BBoxes" if checked else "Hide BBoxes")
     
     def refresh_streams(self):
-        """Refresh list of active streams"""
         try:
             videos = self.api_client.list_videos()
             active_streams = [v for v in videos if v['is_streaming']]
             
-            # Save current selection
             current_id = self.stream_combo.currentData()
             
             self.stream_combo.clear()
@@ -143,15 +154,16 @@ class ViewerTab(QWidget):
                 if stream['id'] == current_id:
                     found_index = i
             
-            # Restore selection if it still exists
             if found_index != -1:
                 self.stream_combo.setCurrentIndex(found_index)
                 
-        except Exception as e:
-            pass  # Silently fail during auto-refresh
+        except Exception:
+            pass # Silently fail on refresh
+        
+        # Update UI state after refresh
+        self.update_stream_availability_ui()
     
     def add_stream_player(self):
-        """Add a video player for selected stream"""
         if self.stream_combo.count() == 0:
             QMessageBox.warning(self, "No Streams", "No active streams available!")
             return
@@ -167,55 +179,78 @@ class ViewerTab(QWidget):
             return
         
         try:
-            # Get stream info
             status = self.api_client.get_stream_status(video_id)
-            if not status['is_streaming']:
+            if not status.get('is_streaming'):
                 QMessageBox.warning(self, "Not Streaming", "This stream is not active!")
                 return
             
-            port = status['port']
-            stream_start_time = status.get('stream_start_time_ms')
+            dash_info = status.get('dash')
+            if not dash_info or 'manifest_url' not in dash_info:
+                QMessageBox.critical(self, "Error", "DASH manifest URL missing from stream status!")
+                return
             
+            stream_start_time = status.get('stream_start_time_ms')
             if not stream_start_time:
                 QMessageBox.critical(self, "Error", "Stream metadata missing! Restart the stream.")
                 return
             
-            # Create video player
+            manifest_url = dash_info['manifest_url']
+            
             player = VideoPlayerWidget(
                 video_id,
-                port,
+                manifest_url,
                 stream_start_time,
                 self.backend_url,
                 replay_duration_seconds=30.0
             )
             player.closed.connect(self.remove_player)
             
-            # Apply current settings to new player
             if hasattr(player, 'bbox_overlay'):
                 player.bbox_overlay.set_min_confidence(self.confidence_spinner.value())
                 player.bbox_overlay.set_bbox_retention(self.retention_spinner.value())
                 player.bbox_overlay.toggle_visibility(not self.hide_bboxes_btn.isChecked())
             
-            # Add to layout
-            self.player_container_layout.addWidget(player)
+            # Add player with stretch 1 so it fills space
+            self.player_container_layout.addWidget(player, 1)
             self.active_player = player
             
-            # Disable controls
-            self.add_stream_btn.setEnabled(False)
-            self.stream_combo.setEnabled(False)
+            # Disable controls and hide "No streams" label
+            self.update_stream_availability_ui()
+
+            # Show bbox controls
+            self.confidence_spinner_label.setVisible(True)
+            self.confidence_spinner.setVisible(True)
+            self.retention_spinner.setVisible(True)
+            self.retention_spinner_label.setVisible(True)
+            self.hide_bboxes_btn.setVisible(True)
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to add stream player:\n{str(e)}")
     
     def remove_player(self, video_id: int):
-        """Remove the video player"""
         if self.active_player and self.active_player.video_id == video_id:
-            print(f"[ViewerTab] Removing player for video {video_id}")
-            
-            self.player_container_layout.removeWidget(self.active_player)
-            self.active_player.deleteLater()
+            player = self.active_player
             self.active_player = None
             
-            # Re-enable controls
-            self.add_stream_btn.setEnabled(True)
-            self.stream_combo.setEnabled(True)
+            self.player_container_layout.removeWidget(player)
+            player.hide()
+            player.setParent(None)
+            player.deleteLater()
+            
+            # Re-enable controls and show "No streams" label if needed
+            self.update_stream_availability_ui()
+
+            # Hide bbox controls
+            self.confidence_spinner_label.setVisible(False)
+            self.confidence_spinner.setVisible(False)
+            self.retention_spinner.setVisible(False)
+            self.retention_spinner_label.setVisible(False)
+            self.hide_bboxes_btn.setVisible(False)
+
+
+    def cleanup_active_player(self):
+        self.refresh_timer.stop()
+        if self.active_player:
+            self.active_player.cleanup()
+            self.active_player.deleteLater()
+            self.active_player = None

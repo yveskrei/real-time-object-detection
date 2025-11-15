@@ -7,7 +7,6 @@ from api_client import APIClient
 from widgets.management_tab import ManagementTab
 from widgets.viewer_tab import ViewerTab
 
-
 class MainWindow(QMainWindow):
     """Main application window with WebSocket support"""
     
@@ -27,7 +26,7 @@ class MainWindow(QMainWindow):
         tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
         
         # Add tabs
-        self.management_tab = ManagementTab(self.api_client)
+        self.management_tab = ManagementTab(self.api_client, self.backend_url)
         self.viewer_tab = ViewerTab(self.api_client, self.backend_url)
         
         tabs.addTab(self.management_tab, "📁 Management")
@@ -35,6 +34,19 @@ class MainWindow(QMainWindow):
         
         self.setCentralWidget(tabs)
 
+    def closeEvent(self, event):
+        """
+        Handle window close event to clean up all resources
+        and prevent segmentation faults.
+        """
+        
+        # Stop timers in management tab
+        self.management_tab.refresh_timer.stop()
+        
+        # Clean up active player in viewer tab
+        self.viewer_tab.cleanup_active_player()
+        
+        event.accept()
 
 def main():
     parser = argparse.ArgumentParser(description='Video Stream Management Application')
@@ -49,7 +61,6 @@ def main():
     window.show()
     
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()

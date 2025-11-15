@@ -68,3 +68,5 @@ sources/
 video-streamer/library/dependencies/
 *.mp4
 *.so
+*.mpd
+*.m4s

@@ -9,11 +9,7 @@ router = APIRouter(prefix="/streams", tags=["streams"])
 @router.post("/start")
 def start_stream(config: StreamConfig):
     """Start streaming a video"""
-    return StreamManager.start_stream(
-        config.video_id,
-        config.output_format,
-        config.resolution
-    )
+    return StreamManager.start_stream(config.video_id)
 
 @router.post("/stop/{video_id}")
 def stop_stream(video_id: int):

@@ -22,7 +22,7 @@ done
 
 # Set environment variables
 export PLAYER_BACKEND_URL="http://127.0.0.1:8702"
-export RUST_LOG=INFO
+export RUST_LOG=info,rdkafka=off,librdkafka=off
 
 # Start binary
 cd client

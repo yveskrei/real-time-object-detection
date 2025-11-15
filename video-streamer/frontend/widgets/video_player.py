@@ -1,13 +1,8 @@
-"""
-Video player using WebSocket for real-time bbox synchronization (LIVE MODE - NO DELAY)
-"""
-
 import av
 import time
 import numpy as np
-import threading  # Import threading
+import threading
 from collections import deque
-from pathlib import Path
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFileDialog, QMessageBox
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QBuffer, QIODevice
 from PyQt6.QtGui import QImage, QPixmap, QPainter
@@ -16,7 +11,6 @@ from websocket_client import WebSocketClient
 
 
 class ReplaySaveThread(QThread):
-    """Background thread for saving replay"""
     progress = pyqtSignal(int, int)
     finished = pyqtSignal(bool, str)
     
@@ -43,13 +37,18 @@ class ReplaySaveThread(QThread):
             for i, jpeg_data in enumerate(self.replay_buffer):
                 qimage = QImage.fromData(jpeg_data, "JPEG")
                 qimage = qimage.convertToFormat(QImage.Format.Format_RGB888)
+                
+                if qimage.width() != width or qimage.height() != height:
+                    qimage = qimage.scaled(width, height, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                
                 ptr = qimage.bits()
                 ptr.setsize(qimage.sizeInBytes())
                 arr = np.array(ptr).reshape(height, width, 3)
                 
                 frame = av.VideoFrame.from_ndarray(arr, format='rgb24')
+                frame_yuv = frame.reformat(format=stream.pix_fmt)
                 
-                for packet in stream.encode(frame):
+                for packet in stream.encode(frame_yuv):
                     output.mux(packet)
                 
                 self.progress.emit(i + 1, total_frames)
@@ -65,59 +64,41 @@ class ReplaySaveThread(QThread):
 
 
 class VideoStreamThread(QThread):
-    """Thread for reading video stream frames"""
-    frame_ready = pyqtSignal(object, int, int, float)  # frame, frame_number, pts_raw, time_base
-    stream_info = pyqtSignal(float)  # fps
-    error = pyqtSignal(str)
+    frame_ready = pyqtSignal(bytes, tuple, int, int)
+    stream_info = pyqtSignal(float)
     
-    def __init__(self, stream_url: str):
+    def __init__(self, dash_url: str):
         super().__init__()
-        self.stream_url = stream_url
-        self.running = False
+        self.dash_url = dash_url
+        self._stop_flag = threading.Event()
         self.frame_count = 0
-        self.container = None
-        self._lock = threading.Lock()  # Lock to protect container closing
     
     def run(self):
-        """Read frames from SRT stream"""
-        self.running = True
-        
-        while self.running:
-            local_container = None
+        container = None
+        while not self._stop_flag.is_set():
             try:
-                print(f"[VideoStreamThread] Connecting to {self.stream_url}...")
-                
-                # SRT-specific options
-                options = {
-                    'mode': 'caller', 'latency': '200000', 'maxbw': '0',
-                    'timeout': '5000000', 'connect_timeout': '5000000',
-                    'rcvbuf': '48234496', 'sndbuf': '48234496',
-                    'peerlatency': '0', 'tlpktdrop': '1', 'payload_size': '1316',
-                }
-                
-                # Check running flag *before* blocking call
-                if not self.running:
+                if self._stop_flag.is_set():
                     break
                 
-                # av.open() can block. We don't hold the lock here.
-                local_container = av.open(self.stream_url, options=options, timeout=10.0)
+                options = {
+                    'timeout': '10000000',
+                    'reconnect': '1',
+                    'reconnect_streamed': '1',
+                    'reconnect_delay_max': '2'
+                }
                 
-                # Now that we have a container, acquire lock to assign it
-                with self._lock:
-                    if not self.running:
-                        # stop() was called while we were in av.open()
-                        local_container.close()
-                        break
-                    self.container = local_container
+                container = av.open(self.dash_url, options=options, timeout=10.0)
                 
-                if len(self.container.streams.video) == 0:
-                    self.error.emit("No video stream found")
+                if self._stop_flag.is_set():
+                    break
+                
+                if len(container.streams.video) == 0:
                     time.sleep(2)
-                    continue # Loop will go to finally, close, and retry
+                    continue
                 
-                video_stream = self.container.streams.video[0]
+                video_stream = container.streams.video[0]
+                stream_time_base = float(video_stream.time_base)
                 
-                # Get FPS
                 stream_fps = 30.0
                 if video_stream.average_rate:
                     stream_fps = float(video_stream.average_rate)
@@ -126,104 +107,76 @@ class VideoStreamThread(QThread):
                 elif video_stream.codec_context.framerate:
                     stream_fps = float(video_stream.codec_context.framerate)
                 
-                self.stream_info.emit(stream_fps)
-                time_base = float(video_stream.time_base)
+                if not self._stop_flag.is_set():
+                    self.stream_info.emit(stream_fps)
                 
-                frame_received = False
-                waiting_for_keyframe = True
+                start_wall_time = None
+                start_pts_time = None
                 
-                for packet in self.container.demux(video_stream):
-                    if not self.running:
+                for packet in container.demux(video_stream):
+                    if self._stop_flag.is_set():
                         break
                     
-                    if waiting_for_keyframe and not packet.is_keyframe:
-                        continue
-                    
                     try:
-                        for frame in packet.decode():
-                            if not self.running:
+                        frames = packet.decode()
+                        if not frames:
+                            continue
+
+                        for frame in frames:
+                            if self._stop_flag.is_set():
                                 break
                             
-                            if waiting_for_keyframe:
-                                waiting_for_keyframe = False
-                                print(f"[VideoStreamThread] Found keyframe, starting decode...")
+                            if frame.pts is None:
+                                continue
+
+                            current_pts_seconds = float(frame.pts * stream_time_base)
                             
-                            if not frame_received:
-                                print(f"[VideoStreamThread] First frame received!")
-                                frame_received = True
+                            if start_wall_time is None:
+                                start_wall_time = time.monotonic()
+                                start_pts_time = current_pts_seconds
+
+                            expected_wall_time = start_wall_time + (current_pts_seconds - start_pts_time)
+                            current_wall_time = time.monotonic()
+                            wait_time = expected_wall_time - current_wall_time
+                            
+                            if wait_time > 0.001:
+                                time.sleep(wait_time)
                             
                             self.frame_count += 1
-                            pts_raw = frame.pts
-                            
-                            if pts_raw is None:
-                                pts_raw = int((self.frame_count / 30.0) / time_base)
-                            
                             img = frame.to_ndarray(format='rgb24')
-                            self.frame_ready.emit(img, self.frame_count, pts_raw, time_base)
+                            
+                            frame_bytes = img.tobytes()
+                            frame_shape = img.shape
+                            
+                            pts_90khz = int(frame.pts * (90000 * video_stream.time_base))
+                            
+                            if not self._stop_flag.is_set():
+                                self.frame_ready.emit(frame_bytes, frame_shape, self.frame_count, pts_90khz)
                     
-                    except av.AVError as decode_error:
-                        if not frame_received:
-                            waiting_for_keyframe = True
-                        else:
-                            raise
+                    except av.AVError:
+                        pass
             
-            except Exception as e:
-                if not self.running:
-                    # This was an intentional stop. The container is (or is being)
-                    # closed by stop(). We just need to exit.
+            except Exception:
+                if self._stop_flag.is_set():
                     break
-                
-                error_msg = f"Stream error: {str(e)}"
-                self.error.emit(error_msg)
-                time.sleep(2) # Wait before retrying
+                time.sleep(2)
             
             finally:
-                # This block runs on loop exit (break), error, or normal stream end.
-                # Use the lock to ensure stop() isn't *also* closing it.
-                with self._lock:
-                    if self.container:
-                        try:
-                            self.container.close()
-                        except Exception as e:
-                            print(f"[VideoStreamThread] Error in finally close: {e}")
-                        self.container = None
-                    elif local_container:
-                        # Case where stop() was called during av.open()
-                        # and self.container was never set
-                        try:
-                            local_container.close()
-                        except Exception as e:
-                            print(f"[VideoStreamThread] Error in finally (local) close: {e}")
-        
-        print(f"[VideoStreamThread] Thread for {self.stream_url} has stopped.")
+                if container:
+                    try:
+                        container.close()
+                    except:
+                        pass
+                    container = None
     
     def stop(self):
-        """Stop reading frames"""
-        print(f"[VideoStreamThread] Stopping thread for {self.stream_url}...")
-        
-        with self._lock:
-            # Set running flag *inside* lock to prevent race condition
-            # where run() loop checks running, then stop() sets it,
-            # then run() thread proceeds to open a new container.
-            self.running = False 
-            
-            if self.container:
-                try:
-                    self.container.close()
-                except Exception as e:
-                    print(f"[VideoStreamThread] Error closing container in stop(): {e}")
-                # Set to None to prevent finally block from re-closing
-                self.container = None 
-        
-        self.wait(3000)
+        self._stop_flag.set()
 
 
 class VideoPlayerWidget(QWidget):
-    """Video player with WebSocket-based bbox synchronization (LIVE MODE - NO DELAY)"""
-    
     closed = pyqtSignal(int)
     
-    def __init__(self, video_id: int, port: int, stream_start_time_ms: int, 
+    def __init__(self, video_id: int, dash_manifest_url: str, stream_start_time_ms: int, 
                  backend_url: str, replay_duration_seconds: float = 30.0, 
                  parent=None):
         super().__init__(parent)
@@ -231,22 +184,14 @@ class VideoPlayerWidget(QWidget):
         self.backend_url = backend_url
         self.stream_start_time_ms = stream_start_time_ms
         
-        # Extract host
-        backend_host = backend_url.replace('http://', '').replace('https://', '')
-        if ':' in backend_host:
-            backend_host = backend_host.split(':')[0]
-        if '/' in backend_host:
-            backend_host = backend_host.split('/')[0]
-        
-        self.stream_url = f"srt://{backend_host}:{port}"
-        print(f"[VideoPlayer] Constructed SRT URL: {self.stream_url}")
+        self.dash_url = f"{backend_url}{dash_manifest_url}"
         
         self.replay_duration_seconds = replay_duration_seconds
         self.bbox_cache = {}
         self.bbox_cache_max_age_seconds = 5.0
         
-        self.current_pts_raw = 0
-        self.time_base = 1/90000.0
+        self.current_pts_90khz = 0
+        # self.first_frame_pts = None # No longer needed for PTS display
         
         self.stream_fps = 30.0
         self.fps_locked = False
@@ -263,6 +208,8 @@ class VideoPlayerWidget(QWidget):
         
         self.ws_client = None
         self.ws_connected = False
+        
+        self._cleanup_done = False
         
         self.setup_ui()
         self.start_stream()
@@ -282,7 +229,6 @@ class VideoPlayerWidget(QWidget):
                 old_buffer[-new_size:] if len(old_buffer) > new_size else old_buffer,
                 maxlen=new_size
             )
-            print(f"[Replay] Buffer size: {new_size} frames ({self.replay_duration_seconds}s @ {self.stream_fps:.1f} FPS)")
     
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -334,12 +280,10 @@ class VideoPlayerWidget(QWidget):
         self.ws_client.connection_status.connect(self.on_websocket_status)
         self.ws_client.error_occurred.connect(self.on_websocket_error)
         self.ws_client.connect()
-        
-        self.ping_timer = QTimer()
-        self.ping_timer.timeout.connect(self.send_websocket_ping)
-        self.ping_timer.start(15000)
     
     def on_websocket_status(self, connected: bool, message: str):
+        if self._cleanup_done:
+            return
         self.ws_connected = connected
         if connected:
             self.ws_status.setText("🟢 WS: Connected")
@@ -349,83 +293,103 @@ class VideoPlayerWidget(QWidget):
             self.ws_status.setStyleSheet("color: red; font-weight: bold;")
     
     def on_websocket_error(self, error_msg: str):
-        print(f"[WebSocket] Error: {error_msg}")
+        pass
     
     def on_websocket_stream_info(self, data: dict):
-        print(f"[WebSocket] Stream info received: {data}")
+        pass
     
     def on_websocket_bbox(self, data: dict):
-        pts_raw = data.get('pts')
+        if self._cleanup_done:
+            return
+        pts_90khz = data.get('pts')
         bboxes = data.get('bboxes', [])
         
-        if pts_raw is not None:
-            self.bbox_cache[pts_raw] = bboxes
+        if pts_90khz is not None:
+            self.bbox_cache[pts_90khz] = bboxes
             self.cleanup_bbox_cache()
     
     def cleanup_bbox_cache(self):
-        if not self.bbox_cache or self.time_base == 0:
+        if not self.bbox_cache:
             return
         
-        cutoff_seconds = self.bbox_cache_max_age_seconds
-        cutoff_pts = int(cutoff_seconds / self.time_base)
-        min_pts = self.current_pts_raw - cutoff_pts
+        # Use a PTS value 5 seconds *before* the current stream PTS
+        # as the cutoff.
+        cutoff_pts = self.current_pts_90khz - int(self.bbox_cache_max_age_seconds * 90000.0)
         
-        to_remove = [pts for pts in self.bbox_cache if pts < min_pts]
+        to_remove = [pts for pts in self.bbox_cache if pts < cutoff_pts]
         for pts in to_remove:
             del self.bbox_cache[pts]
     
-    def send_websocket_ping(self):
-        if self.ws_client and self.ws_connected:
-            self.ws_client.send_ping()
-    
     def start_stream(self):
-        self.stream_thread = VideoStreamThread(self.stream_url)
+        self.stream_thread = VideoStreamThread(self.dash_url)
         self.stream_thread.frame_ready.connect(self.on_frame_ready)
         self.stream_thread.stream_info.connect(self.on_stream_info)
-        self.stream_thread.error.connect(self.on_stream_error)
         self.stream_thread.start()
     
     def on_stream_info(self, fps: float):
+        if self._cleanup_done:
+            return
         if not self.fps_locked:
             self.stream_fps = fps
             self.fps_locked = True
             self._update_replay_buffer_size()
-            print(f"[VideoPlayer] Stream FPS locked: {fps:.2f}")
     
-    def on_frame_ready(self, frame, frame_number, pts_raw, time_base):
-        self.time_base = time_base
-        self.current_pts_raw = pts_raw
+    def on_frame_ready(self, frame_bytes, frame_shape, frame_number, pts_90khz):
+        if self._cleanup_done:
+            return
         
-        bboxes = self.get_bboxes_with_retention(pts_raw)
-        self.bbox_overlay.set_bboxes(bboxes)
-        
-        self.display_frame(frame)
+        try:
+            self.current_pts_90khz = pts_90khz
+            
+            # if self.first_frame_pts is None: # No longer needed
+            #     self.first_frame_pts = pts_90khz
+            
+            bboxes = self.get_bboxes_for_frame(pts_90khz)
+            
+            frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(frame_shape)
+            self.bbox_overlay.set_bboxes(bboxes)
+            self.display_frame(frame)
+            
+        except Exception as e:
+            print(f"[ERROR] on_frame_ready: {e}")
     
-    def get_bboxes_with_retention(self, pts_raw: int, tolerance_pts: int = None):
-        if self.time_base == 0: return []
-        if tolerance_pts is None:
-            tolerance_pts = int((100 / 1000.0) / self.time_base)
-        
+    def get_bboxes_for_frame(self, frame_pts_90khz: int):
+        # FIX 3: (From your original code) Re-written retention logic to be unified and correct.
         retention_frames = self.bbox_overlay.bbox_retention_frames
         all_bboxes = []
         
         if self.stream_fps > 0:
-            pts_per_frame = int((1.0 / self.stream_fps) / self.time_base)
-            pts_range = pts_per_frame * retention_frames
+            pts_per_frame = 90000.0 / self.stream_fps
         else:
-            pts_range = int((retention_frames * 0.033) / self.time_base)
+            pts_per_frame = 3000.0  # 30fps default
+        
+        # Tolerance window is half a frame
+        tolerance_pts = int(pts_per_frame * 0.5)
+        
+        # The window *ends* at the current frame's PTS + tolerance
+        # (e.g., show bboxes for this frame or slightly in the future)
+        pts_window_end = frame_pts_90khz + tolerance_pts
+        
+        # The window *starts* (n-1) frames in the past, *also with tolerance*
+        # This (n-1) calculation is key for retention.
+        pts_range_past = int(pts_per_frame * (retention_frames - 1))
+        pts_window_start = frame_pts_90khz - pts_range_past - tolerance_pts
+        
+        # This unified logic works for n=1 and n>1:
+        # n=1: pts_range_past = 0
+        #   -> (frame_pts - tol) <= cached_pts <= (frame_pts + tol)
+        # n=2: pts_range_past = 1 * pts_per_frame
+        #   -> (frame_pts - 1_frame - tol) <= cached_pts <= (frame_pts + tol)
         
         for cached_pts, bboxes in self.bbox_cache.items():
-            if pts_raw - pts_range <= cached_pts <= pts_raw + tolerance_pts:
+            if pts_window_start <= cached_pts <= pts_window_end:
                 all_bboxes.extend(bboxes)
         
         return all_bboxes
     
-    def on_stream_error(self, error_msg: str):
-        print(f"[VideoPlayer] Stream error: {error_msg}")
-        self.info_label.setText(f"Video ID: {self.video_id} | Error: {error_msg}")
-    
     def display_frame(self, frame):
+        if self._cleanup_done:
+            return
         h, w, ch = frame.shape
         
         if self.frame_width != w or self.frame_height != h:
@@ -434,7 +398,7 @@ class VideoPlayerWidget(QWidget):
             self.bbox_overlay.set_frame_dimensions(w, h)
         
         bytes_per_line = ch * w
-        qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qt_image)
         
         self.video_label.setPixmap(pixmap)
@@ -452,27 +416,37 @@ class VideoPlayerWidget(QWidget):
             self.fps_frame_count = 0
             self.fps_last_update = current_time
         
-        pts_seconds = self.current_pts_raw * self.time_base
-        hours = int(pts_seconds // 3600)
-        minutes = int((pts_seconds % 3600) // 60)
-        seconds = pts_seconds % 60
+        # FIX 1: (From your original code) Changed PTS calculation to show absolute stream time.
+        # Instead of subtracting the 'first_frame_pts' (time since client
+        # started watching), we just use the current_pts_90khz directly.
+        # This shows the actual media timestamp from the stream.
+        elapsed_seconds = max(0.0, self.current_pts_90khz / 90000.0)
         
-        pts_str = f"{minutes:02d}:{seconds:05.2f}"
+        hours = int(elapsed_seconds // 3600)
+        minutes = int((elapsed_seconds % 3600) // 60)
+        seconds = elapsed_seconds % 60
+        
+        # Show hours only if they are non-zero
         if hours > 0:
-            pts_str = f"{hours:02d}:{pts_str}"
-        
+            pts_str = f"{hours:02d}:{minutes:02d}:{seconds:05.2f}"
+        else:
+            pts_str = f"{minutes:02d}:{seconds:05.2f}"
+
         actual_replay_duration = len(self.replay_buffer) / max(self.stream_fps, 1.0)
         self.save_replay_btn.setText(f"💾 Save Last {actual_replay_duration:.1f}s")
         
         self.info_label.setText(
             f"Video ID: {self.video_id} | "
-            f"FPS: {self.current_display_fps:.1f} | "
+            f"Stream FPS: {self.stream_fps:.1f} | "
+            f"Display FPS: {self.current_display_fps:.1f} | "
             f"PTS: {pts_str} | "
             f"Cache: {len(self.bbox_cache)} | "
             f"LIVE"
         )
     
     def capture_replay_frame(self):
+        if self._cleanup_done:
+            return
         pixmap_to_save = self.video_label.pixmap()
         if pixmap_to_save is None or pixmap_to_save.isNull():
             return
@@ -548,12 +522,16 @@ class VideoPlayerWidget(QWidget):
         self.save_replay_btn.setEnabled(False)
     
     def on_save_progress(self, current, total):
-        percent = (current / total) * 100
+        if self._cleanup_done:
+            return
+        percent = (current / total)* 100
         self.save_replay_btn.setText(f"💾 Saving... {percent:.0f}%")
     
     def on_save_finished(self, success, message):
+        if self._cleanup_done:
+            return
         actual_duration = len(self.replay_buffer) / max(self.stream_fps, 1.0)
-        self.save_replay_btn.setText(f"💾 Save Last {actual_duration:.1f}s")
+        self.save_replay_btn.setText(f"💾 Save Last {actual_replay_duration:.1f}s")
         self.save_replay_btn.setEnabled(True)
         
         if success:
@@ -562,22 +540,35 @@ class VideoPlayerWidget(QWidget):
             QMessageBox.critical(self, "Save Error", message)
     
     def stop_watching(self):
-        self.cleanup()
-        self.closed.emit(self.video_id)
-    
-    def cleanup(self):
-        if hasattr(self, 'ping_timer'):
-            self.ping_timer.stop()
+        if self._cleanup_done:
+            return
         
-        # Stop stream thread *before* websocket
+        self._cleanup_done = True
+        self.stop_button.setEnabled(False)
+        
         if hasattr(self, 'stream_thread'):
             self.stream_thread.stop()
             
         if hasattr(self, 'ws_client') and self.ws_client:
             self.ws_client.disconnect()
         
-        if hasattr(self, 'save_thread') and self.save_thread:
+        QTimer.singleShot(200, self.finish_cleanup)
+    
+    def finish_cleanup(self):
+        if hasattr(self, 'stream_thread'):
+            self.stream_thread.wait(3000)
+            if self.stream_thread.isRunning():
+                self.stream_thread.terminate()
+                self.stream_thread.wait()
+        
+        if hasattr(self, 'save_thread') and self.save_thread and self.save_thread.isRunning():
             self.save_thread.wait()
+        
+        self.closed.emit(self.video_id)
+    
+    def cleanup(self):
+        if not self._cleanup_done:
+            self.stop_watching()
     
     def closeEvent(self, event):
         self.cleanup()

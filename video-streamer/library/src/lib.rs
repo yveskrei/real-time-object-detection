@@ -29,8 +29,9 @@ macro_rules! log_error {
 
 #[macro_export]
 macro_rules! log_debug {
-    ($manager:expr, $($arg:tt)*) => {{
-        if *$manager.log_level.lock().unwrap() == $crate::stream::LogLevel::Debug {
+    // Updated: Reads log level from the static STREAM_MANAGER
+    ($($arg:tt)*) => {{
+        if *$crate::stream::STREAM_MANAGER.log_level.lock().unwrap() == $crate::stream::LogLevel::Debug {
             println!("[CLIENT_STREAM][DBG] {}", format!($($arg)*))
         }
     }};
@@ -42,7 +43,7 @@ pub type SourceStoppedCallback = extern "C" fn(source_id: c_int);
 pub type SourceNameCallback = extern "C" fn(source_id: c_int, source_name: *const c_char);
 pub type SourceStatusCallback = extern "C" fn(source_id: c_int, source_status: c_int);
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 pub extern "C" fn SetCallbacks(
     source_frames: SourceFramesCallback,
     source_stopped: SourceStoppedCallback,
@@ -53,7 +54,7 @@ pub extern "C" fn SetCallbacks(
     stream::set_callbacks(source_frames, source_stopped, source_name, source_status);
 }
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 pub extern "C" fn InitMultipleSources(source_ids: *const c_int, size: c_int, log_level: c_int) {
     log_info!("InitMultipleSources called with {} sources, log_level: {}", size, log_level);
     
@@ -94,6 +95,7 @@ pub extern "C" fn InitMultipleSources(source_ids: *const c_int, size: c_int, log
         return;
     }
     
+    // This call sets the log level on the static STREAM_MANAGER
     if let Err(e) = stream::start_streams(ids, log_level) {
         log_error!("Failed to initialize sources: {}", e)
     }
@@ -108,7 +110,7 @@ pub extern "C" fn InitMultipleSources(source_ids: *const c_int, size: c_int, log
     });
 }
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 #[allow(unused_variables)]
 pub extern "C" fn PostResults(source_id: c_int, result_json: *const c_char) -> c_int {
     if result_json.is_null() {
@@ -166,7 +168,7 @@ async fn post_results_async(json_str: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 pub extern "C" fn FreeCPtr(ptr: *const c_void) {
     if ptr.is_null() {
         log_error!("FreeCPtr: attempted to free null pointer");
