@@ -19,7 +19,7 @@ use crate::client_video::ClientVideo;
 // Variables
 pub static PROCESSORS: OnceCell<RwLock<HashMap<String, Arc<SourceProcessor>>>> = OnceCell::const_new();
 pub static MAX_QUEUE_FRAMES: usize = 15;
-pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(10);
+pub static SOURCE_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Returns a source processor instance by given stream ID
 pub async fn get_source_processor(stream_id: &str) -> Result<Arc<SourceProcessor>> {

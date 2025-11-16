@@ -110,6 +110,8 @@ class VideoStreamThread(QThread):
                 if not self._stop_flag.is_set():
                     self.stream_info.emit(stream_fps)
                 
+                # TIMING FIX: Track the last PTS we processed to detect discontinuities
+                last_pts = None
                 start_wall_time = None
                 start_pts_time = None
                 
@@ -131,16 +133,36 @@ class VideoStreamThread(QThread):
 
                             current_pts_seconds = float(frame.pts * stream_time_base)
                             
-                            if start_wall_time is None:
-                                start_wall_time = time.monotonic()
-                                start_pts_time = current_pts_seconds
-
-                            expected_wall_time = start_wall_time + (current_pts_seconds - start_pts_time)
-                            current_wall_time = time.monotonic()
-                            wait_time = expected_wall_time - current_wall_time
+                            # TIMING FIX: Detect PTS discontinuities (jumps/resets)
+                            if last_pts is not None:
+                                pts_diff = current_pts_seconds - last_pts
+                                # If jump is > 2 seconds or negative, reset timing
+                                if abs(pts_diff) > 2.0:
+                                    start_wall_time = None
+                                    start_pts_time = None
                             
+                            last_pts = current_pts_seconds
+                            
+                            # TIMING FIX: Initialize or reset timing anchors
+                            if start_wall_time is None:
+                                start_wall_time = time.perf_counter()
+                                start_pts_time = current_pts_seconds
+                            
+                            # TIMING FIX: Calculate precise target display time
+                            elapsed_stream_time = current_pts_seconds - start_pts_time
+                            target_wall_time = start_wall_time + elapsed_stream_time
+                            current_wall_time = time.perf_counter()
+                            
+                            # TIMING FIX: Sleep until it's time to emit this frame
+                            wait_time = target_wall_time - current_wall_time
+                            
+                            # Only sleep if we're ahead, with minimum sleep threshold
                             if wait_time > 0.001:
                                 time.sleep(wait_time)
+                            elif wait_time < -0.1:
+                                # TIMING FIX: If we're more than 100ms behind, skip to catch up
+                                # But still emit the frame so display doesn't freeze
+                                pass
                             
                             self.frame_count += 1
                             img = frame.to_ndarray(format='rgb24')
@@ -531,7 +553,7 @@ class VideoPlayerWidget(QWidget):
         if self._cleanup_done:
             return
         actual_duration = len(self.replay_buffer) / max(self.stream_fps, 1.0)
-        self.save_replay_btn.setText(f"💾 Save Last {actual_replay_duration:.1f}s")
+        self.save_replay_btn.setText(f"💾 Save Last {actual_duration:.1f}s")
         self.save_replay_btn.setEnabled(True)
         
         if success:

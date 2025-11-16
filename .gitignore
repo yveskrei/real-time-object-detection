@@ -58,6 +58,11 @@ pytest_cache/
 htmlcov/
 .tox/
 
+# File containers
+*.zip
+*.tar
+*.gz
+
 # Project-specific
 models/
 sources/
