@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from routers import videos, streams, bboxes
@@ -11,7 +12,6 @@ from websocket_manager import manager as ws_manager
 async def lifespan(app: FastAPI):
     """Cleanup on shutdown"""
     yield
-    # Stop all active streams on shutdown
     for video_id in list(storage.active_streams.keys()):
         try:
             StreamManager.stop_stream(video_id)
@@ -20,12 +20,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Video Stream Management API",
-    description="API for managing video streams with real-time bbox WebSocket support",
-    version="2.0.0",
+    description="API for managing video streams with DASH and real-time bbox WebSocket support",
+    version="3.0.0",
     lifespan=lifespan
 )
 
-# CORS middleware for WebSocket support
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,19 +33,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
 app.include_router(videos.router)
 app.include_router(streams.router)
 app.include_router(bboxes.router)
 
+app.mount("/dash", StaticFiles(directory="dash_streams"), name="dash")
+
 @app.get("/")
 def root():
     return {
-        "message": "Video Stream Management API with WebSocket",
+        "message": "Video Stream Management API with DASH and WebSocket",
         "docs": "/docs",
         "total_videos": len(storage.videos),
         "active_streams": len(storage.active_streams),
-        "websocket_endpoint": "/ws/{video_id}"
+        "websocket_endpoint": "/ws/{video_id}",
+        "dash_endpoint": "/dash/{video_id}/manifest.mpd"
     }
 
 @app.get("/health")
@@ -59,16 +60,11 @@ async def websocket_endpoint(websocket: WebSocket, video_id: int):
     await ws_manager.connect(websocket, video_id)
     
     try:
-        # Send initial stream info
         await ws_manager.send_stream_info(websocket, video_id)
         
-        # Keep connection alive and handle client messages
         while True:
             try:
-                # Receive messages from client (mostly ping/pong for keep-alive)
                 data = await websocket.receive_text()
-                
-                # Echo back as heartbeat confirmation
                 await websocket.send_json({
                     "type": "pong",
                     "message": "alive"
@@ -78,7 +74,6 @@ async def websocket_endpoint(websocket: WebSocket, video_id: int):
             except Exception as e:
                 print(f"[WebSocket] Error in receive loop: {e}")
                 break
-    
     finally:
         await ws_manager.disconnect(websocket, video_id)
 

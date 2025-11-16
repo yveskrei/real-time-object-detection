@@ -23,12 +23,42 @@ export FFMPEG_INCLUDE_DIR="$FFMPEG_DIR/include"
 export FFMPEG_LIB_DIR="$FFMPEG_DIR/lib"
 export BINDGEN_EXTRA_CLANG_ARGS="-I$FFMPEG_DIR/include -I$DEPS_DIR/include"
 
-export RUSTFLAGS="-C link-args=-Wl,--whole-archive \
--L$FFMPEG_DIR/lib -lavcodec -lavformat -lavutil -lavfilter -lswscale -lswresample -lpostproc \
--L$DEPS_DIR/lib -lx264 -lx265 -lvpx -lopus -lmp3lame \
--Wl,--no-whole-archive \
--L$DEPS_DIR/lib -lxcb -lxcb-shm -lxcb-shape -lxcb-xfixes -lXau -lXdmcp -llzma -lbz2 \
--lstdc++ -lm -lz -lpthread -ldl"
+# Critical: Use -Wl,-Bstatic for our static libs, then -Wl,-Bdynamic for system libs
+# This ensures system libraries like libc are dynamically linked
+export RUSTFLAGS="-C link-arg=-L$FFMPEG_DIR/lib \
+-C link-arg=-L$DEPS_DIR/lib \
+-C link-arg=-L$DEPS_DIR/lib64 \
+-C link-arg=-Wl,-Bstatic \
+-C link-arg=-lpostproc \
+-C link-arg=-lswresample \
+-C link-arg=-lswscale \
+-C link-arg=-lavfilter \
+-C link-arg=-lavformat \
+-C link-arg=-lavcodec \
+-C link-arg=-lavutil \
+-C link-arg=-lsrt \
+-C link-arg=-lssl \
+-C link-arg=-lcrypto \
+-C link-arg=-lx264 \
+-C link-arg=-lx265 \
+-C link-arg=-lvpx \
+-C link-arg=-lopus \
+-C link-arg=-lmp3lame \
+-C link-arg=-lxcb \
+-C link-arg=-lxcb-shm \
+-C link-arg=-lxcb-shape \
+-C link-arg=-lxcb-xfixes \
+-C link-arg=-lXau \
+-C link-arg=-lXdmcp \
+-C link-arg=-llzma \
+-C link-arg=-lbz2 \
+-C link-arg=-Wl,-Bdynamic \
+-C link-arg=-lstdc++ \
+-C link-arg=-lm \
+-C link-arg=-lz \
+-C link-arg=-lpthread \
+-C link-arg=-ldl \
+-C link-arg=-lc"
 
 cargo clean
 cargo build --release

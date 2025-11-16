@@ -7,6 +7,10 @@ To build the library, ensure you have the necessary dependencies installed. You 
 ```bash
 # Install dependencies on Fedora-based systems
 dnf install -y \
+  perl-FindBin
+  clang \
+  clang-devel \
+  llvm-devel \
   gcc \
   gcc-c++ \
   make \

@@ -1,22 +1,20 @@
 import websocket
 import json
 import threading
-from typing import Callable, Optional
+from typing import Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 class WebSocketClient(QObject):
     """WebSocket client for receiving real-time bbox updates"""
     
-    # Qt signals for thread-safe communication
-    bbox_received = pyqtSignal(dict)  # Emits bbox data
-    stream_info_received = pyqtSignal(dict)  # Emits stream info
-    connection_status = pyqtSignal(bool, str)  # connected, message
+    bbox_received = pyqtSignal(dict)
+    stream_info_received = pyqtSignal(dict)
+    connection_status = pyqtSignal(bool, str)
     error_occurred = pyqtSignal(str)
     
     def __init__(self, backend_url: str, video_id: int):
         super().__init__()
         
-        # Convert HTTP URL to WebSocket URL
         ws_url = backend_url.replace('http://', 'ws://').replace('https://', 'wss://')
         self.url = f"{ws_url}/ws/{video_id}"
         self.video_id = video_id
@@ -46,13 +44,14 @@ class WebSocketClient(QObject):
     def _run_websocket(self):
         """Run WebSocket in thread"""
         try:
+            # Keep-alive pings managed by websocket-client
             self.ws.run_forever(ping_interval=30, ping_timeout=10)
         except Exception as e:
-            self.error_occurred.emit(f"WebSocket error: {str(e)}")
+            if self.running:
+                self.error_occurred.emit(f"WebSocket error: {str(e)}")
     
     def _on_open(self, ws):
         """WebSocket connection opened"""
-        print(f"[WebSocket] Connected to video {self.video_id}")
         self.connection_status.emit(True, "Connected")
     
     def _on_message(self, ws, message):
@@ -62,17 +61,11 @@ class WebSocketClient(QObject):
             msg_type = data.get('type')
             
             if msg_type == 'bboxes':
-                # Real-time bbox update
                 self.bbox_received.emit(data)
-            
             elif msg_type == 'stream_info':
-                # Initial stream information
                 self.stream_info_received.emit(data)
-            
             elif msg_type == 'pong':
-                # Heartbeat response
                 pass
-            
             elif msg_type == 'error':
                 self.error_occurred.emit(data.get('message', 'Unknown error'))
         
@@ -83,27 +76,29 @@ class WebSocketClient(QObject):
     
     def _on_error(self, ws, error):
         """WebSocket error occurred"""
-        error_msg = str(error)
-        print(f"[WebSocket] Error: {error_msg}")
-        self.error_occurred.emit(error_msg)
+        # Don't emit simple "Connection reset by peer" if we initiated the close
+        if self.running and "reset by peer" not in str(error):
+            self.error_occurred.emit(str(error))
     
     def _on_close(self, ws, close_status_code, close_msg):
         """WebSocket connection closed"""
-        print(f"[WebSocket] Disconnected from video {self.video_id}")
+        self.running = False
         self.connection_status.emit(False, f"Disconnected: {close_msg or 'Unknown'}")
     
     def disconnect(self):
-        """Close WebSocket connection"""
+        """Close WebSocket connection non-blockingly"""
         self.running = False
         if self.ws:
+            # Closing the socket will terminate the run_forever loop
             self.ws.close()
-        if self.thread:
-            self.thread.join(timeout=2)
+        
+        # DO NOT call self.thread.join() here, as it blocks the GUI thread
+        # The thread is daemonic and will exit
     
     def send_ping(self):
         """Send ping to keep connection alive"""
         if self.ws and self.running:
             try:
                 self.ws.send(json.dumps({"type": "ping"}))
-            except Exception as e:
-                print(f"[WebSocket] Ping failed: {e}")
+            except Exception:
+                pass

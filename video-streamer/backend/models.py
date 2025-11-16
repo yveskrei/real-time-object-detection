@@ -11,6 +11,9 @@ class VideoInfo(BaseModel):
     file_path: str
     created_at: str
     is_streaming: bool
+    width: int
+    height: int
+    fps: float
 
 class BBoxData(BaseModel):
     pts: int = Field(..., description="Presentation timestamp in milliseconds from video start")
@@ -25,5 +28,3 @@ class BBoxCreate(BaseModel):
 
 class StreamConfig(BaseModel):
     video_id: int
-    output_format: str = "mpegts"
-    resolution: Optional[str] = None

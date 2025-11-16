@@ -156,6 +156,7 @@ impl SourceStats {
 /// 2. inference_frame: How many frames we want to skip before performing inference. In other words, 
 /// "Inference on every N frame". This allows us to skip inference on frames when source has higher frame
 /// rate, having minimal effect on the end user's experience.
+#[allow(dead_code)]
 pub struct SourceProcessor {
     // Settings for multi-threading
     queue: Arc<FixedSizeQueue<Arc<RawFrame>>>,

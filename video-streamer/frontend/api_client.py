@@ -1,5 +1,5 @@
 import requests
-from typing import List, Optional
+from typing import List
 
 class APIClient:
     """Handles all API communication with the backend"""
@@ -34,11 +34,9 @@ class APIClient:
         response.raise_for_status()
         return response.json()
     
-    def start_stream(self, video_id: int, output_format: str = "mpegts", resolution: str = None) -> dict:
+    def start_stream(self, video_id: int) -> dict:
         """Start streaming a video"""
-        data = {"video_id": video_id, "output_format": output_format}
-        if resolution:
-            data["resolution"] = resolution
+        data = {"video_id": video_id}
         response = requests.post(f"{self.base_url}/streams/start", json=data)
         response.raise_for_status()
         return response.json()
@@ -56,9 +54,7 @@ class APIClient:
         return response.json()
     
     def add_bboxes(self, video_id: int, bboxes: List[dict]) -> dict:
-        """
-        Add bounding boxes with raw PTS timestamps
-        """
+        """Add bounding boxes with raw PTS timestamps"""
         data = {
             "stream_id": video_id,
             "bboxes": bboxes

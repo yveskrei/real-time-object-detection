@@ -58,6 +58,11 @@ pytest_cache/
 htmlcov/
 .tox/
 
+# File containers
+*.zip
+*.tar
+*.gz
+
 # Project-specific
 models/
 sources/
@@ -68,3 +73,5 @@ sources/
 video-streamer/library/dependencies/
 *.mp4
 *.so
+*.mpd
+*.m4s
