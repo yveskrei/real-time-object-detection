@@ -1,7 +1,7 @@
-from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
+from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget, QInputDialog, QMessageBox
 from PyQt6.QtCore import Qt
 import sys
-import argparse
+import requests
 
 from api_client import APIClient
 from widgets.management_tab import ManagementTab
@@ -48,16 +48,30 @@ class MainWindow(QMainWindow):
         
         event.accept()
 
+def get_backend_url():
+    while True:
+        url, ok = QInputDialog.getText(None, "Enter Backend URL", "Backend API URL (e.g., http://localhost:8702):")
+        if not ok:
+            sys.exit(0)
+        url = url.strip().rstrip('/')
+        if not url:
+            continue
+        try:
+            resp = requests.get(f"{url}/health", timeout=3)
+            if resp.status_code == 200:
+                return url
+            else:
+                QMessageBox.warning(None, "Connection Failed", f"Health check failed with status code {resp.status_code}. Please enter a valid backend URL.")
+        except Exception as e:
+            QMessageBox.warning(None, "Connection Failed", f"Could not connect to backend:\n{e}\nPlease enter a valid backend URL.")
+
 def main():
-    parser = argparse.ArgumentParser(description='Video Stream Management Application')
-    parser.add_argument('backend_url', type=str, help='Backend API URL (e.g., http://localhost:8702)')
-    
-    args = parser.parse_args()
-    
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     
-    window = MainWindow(args.backend_url)
+    backend_url = get_backend_url()
+    
+    window = MainWindow(backend_url)
     window.show()
     
     sys.exit(app.exec())

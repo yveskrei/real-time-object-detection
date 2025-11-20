@@ -1,7 +1,8 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from routers import videos, streams, bboxes
 from storage import storage
@@ -37,7 +38,34 @@ app.include_router(videos.router)
 app.include_router(streams.router)
 app.include_router(bboxes.router)
 
-app.mount("/dash", StaticFiles(directory="dash_streams"), name="dash")
+# Custom DASH file serving with proper MIME types
+@app.get("/dash/{video_id}/{filename:path}")
+async def serve_dash_file(video_id: int, filename: str):
+    """Serve DASH files with proper MIME types"""
+    file_path = Path("dash_streams") / str(video_id) / filename
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Set proper MIME type based on extension
+    mime_types = {
+        ".mpd": "application/dash+xml",
+        ".m4s": "video/iso.segment",
+        ".mp4": "video/mp4",
+    }
+    
+    suffix = file_path.suffix.lower()
+    media_type = mime_types.get(suffix, "application/octet-stream")
+    
+    return FileResponse(
+        path=file_path,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Expose-Headers": "*"
+        }
+    )
 
 @app.get("/")
 def root():

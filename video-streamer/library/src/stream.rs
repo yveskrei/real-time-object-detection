@@ -245,7 +245,23 @@ impl StreamManager {
                 keepalive_handle.abort();
             }
             _ = &mut keepalive_handle => {
-                // Keepalive detected stream stopped, this will cause decode to error out eventually
+                // Keepalive detected stream stopped
+                // Wait for decode task to finish with timeout to ensure cleanup
+                log_info!("[Source {}] Stream stopped, waiting for decode task to cleanup...", source_id);
+                
+                let timeout_result = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    decode_handle
+                ).await;
+                
+                match timeout_result {
+                    Ok(_) => {
+                        log_debug!("[Source {}] Decode task completed cleanup successfully", source_id);
+                    }
+                    Err(_) => {
+                        log_error!("[Source {}] Decode task cleanup timed out after 5s", source_id);
+                    }
+                }
             }
         }
 
@@ -286,7 +302,13 @@ fn decode_stream(
             Ok(mut ictx) => {
                 log_info!("[Source {}] Successfully connected to UDP stream", source_id);
                 // process_stream will decode, scale to RGB24, and call callbacks
-                return process_stream(source_id, &mut ictx, callbacks);
+                let result = process_stream(source_id, &mut ictx, callbacks);
+                
+                // Explicitly drop the input context to ensure UDP socket is released
+                drop(ictx);
+                log_debug!("[Source {}] FFmpeg input context dropped, UDP port released", source_id);
+                
+                return result;
             }
             Err(e) => {
                 last_error = Some(e);
