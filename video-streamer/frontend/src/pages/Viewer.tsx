@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { listVideos, getStreamStatus } from '../api/streams';
+import { getBackendUrl } from '../api/client';
 import type { Video, BBox } from '../types';
 import { VideoPlayer } from '../components/VideoPlayer';
 import { BBoxOverlay } from '../components/BBoxOverlay';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { RefreshCw, Square, Eye, EyeOff, Play, Pin, Monitor, Activity } from 'lucide-react';
+import { useVideoRecorder } from '../hooks/useVideoRecorder';
+import { RefreshCw, Square, Eye, EyeOff, Play, Pin, Monitor, Activity, Download } from 'lucide-react';
 import clsx from 'clsx';
 
 export const Viewer: React.FC = () => {
@@ -29,10 +31,42 @@ export const Viewer: React.FC = () => {
     const containerRef = useRef<HTMLDivElement>(null);
     const requestRef = useRef<number>(null);
 
+    const handleStopWatching = useCallback(() => {
+        setSelectedStreamId(null);
+        setManifestUrl(null);
+        setOriginalRes({ width: 0, height: 0 });
+    }, []);
+
+    const handleStreamEnded = useCallback(() => {
+        toast('Stream ended', {
+            icon: '🛑',
+            style: {
+                borderRadius: '10px',
+                background: '#333',
+                color: '#fff',
+            },
+        });
+        handleStopWatching();
+    }, [handleStopWatching]);
+
     // WebSocket
-    const { isConnected, bboxBuffer } = useWebSocket(selectedStreamId);
+    const { isConnected, bboxBuffer } = useWebSocket(selectedStreamId, handleStreamEnded);
 
     const [activeBBoxes, setActiveBBoxes] = useState<BBox[]>([]);
+
+    // Video Recorder
+    const { isRecording, recordingDuration, stopRecording, saveRecording } = useVideoRecorder({
+        videoRef,
+        bboxes: showBBoxes ? activeBBoxes : [],
+        originalWidth: originalRes.width,
+        originalHeight: originalRes.height,
+        minConfidence
+    });
+
+    // Stop recording when stream changes
+    useEffect(() => {
+        return () => stopRecording();
+    }, [selectedStreamId, stopRecording]);
 
     // Fetch streams
     const fetchStreams = useCallback(async () => {
@@ -67,11 +101,7 @@ export const Viewer: React.FC = () => {
         }
     };
 
-    const handleStopWatching = () => {
-        setSelectedStreamId(null);
-        setManifestUrl(null);
-        setOriginalRes({ width: 0, height: 0 });
-    };
+
 
     // Resize Observer - track actual video display size and position
     useEffect(() => {
@@ -182,9 +212,9 @@ export const Viewer: React.FC = () => {
         }
 
         // Reduced logging frequency
-        if (Math.random() < 0.005) {
-            console.log('PTS:', currentPts.toFixed(0), 'Active bboxes:', activeBBoxes.length, 'Retention frames:', retentionFrames);
-        }
+        // if (Math.random() < 0.005) {
+        //     console.log('PTS:', currentPts.toFixed(0), 'Active bboxes:', activeBBoxes.length, 'Retention frames:', retentionFrames);
+        // }
 
         setActiveBBoxes(activeBBoxes);
         requestRef.current = requestAnimationFrame(animate);
@@ -200,9 +230,11 @@ export const Viewer: React.FC = () => {
     // Helper to get full URL
     const getFullManifestUrl = (path: string) => {
         if (path.startsWith('http')) return path;
-        const baseUrl = localStorage.getItem('backend_url') || 'http://localhost:8702';
+        const baseUrl = getBackendUrl();
         return `${baseUrl}${path}`;
     };
+
+
 
     return (
         <div className="h-[calc(100vh-8rem)] flex flex-col gap-6">
@@ -221,7 +253,7 @@ export const Viewer: React.FC = () => {
                             disabled={!!selectedStreamId}
                             style={{ textOverflow: 'ellipsis' }}
                         >
-                            <option value="">Select Active Stream...</option>
+                            <option value="">Select Video Stream...</option>
                             {streams.map(s => (
                                 <option key={s.id} value={s.id}>ID {s.id}: {s.name}</option>
                             ))}
@@ -279,6 +311,10 @@ export const Viewer: React.FC = () => {
                                     ref={videoRef}
                                     manifestUrl={getFullManifestUrl(manifestUrl)}
                                     onResolutionChange={(w, h) => setOriginalRes({ width: w, height: h })}
+                                    onError={(err) => {
+                                        toast.error(err);
+                                        handleStopWatching();
+                                    }}
                                 />
                             )}
                             <BBoxOverlay
@@ -335,6 +371,20 @@ export const Viewer: React.FC = () => {
                                     </div>
 
                                     <div className="flex items-center gap-3">
+                                        {/* Recording Controls */}
+                                        <div className="flex items-center gap-1 mr-2 border-r border-white/10 pr-3">
+                                            {isRecording && (
+                                                <button
+                                                    onClick={saveRecording}
+                                                    className="flex items-center px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/20 transition-all animate-pulse"
+                                                    title="Save Buffered Video"
+                                                >
+                                                    <Download className="w-3 h-3 mr-1.5" />
+                                                    Save Last {recordingDuration}s
+                                                </button>
+                                            )}
+                                        </div>
+
                                         <button
                                             onClick={() => setShowBBoxes(!showBBoxes)}
                                             className={clsx(
@@ -345,7 +395,7 @@ export const Viewer: React.FC = () => {
                                             )}
                                         >
                                             {showBBoxes ? <Eye className="w-3 h-3 mr-1.5" /> : <EyeOff className="w-3 h-3 mr-1.5" />}
-                                            {showBBoxes ? 'Overlay On' : 'Overlay Off'}
+                                            AI Analytics {showBBoxes ? 'On' : 'Off'}
                                         </button>
 
                                         <button

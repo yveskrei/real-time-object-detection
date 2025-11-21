@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { getBackendUrl } from '../api/client';
 import type { BBoxMessage } from '../types';
 
-export const useWebSocket = (videoId: number | null) => {
+export const useWebSocket = (videoId: number | null, onDisconnect?: () => void) => {
     const [isConnected, setIsConnected] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
@@ -14,11 +14,9 @@ export const useWebSocket = (videoId: number | null) => {
         const backendUrl = getBackendUrl();
         const wsUrl = backendUrl.replace(/^http/, 'ws').replace(/^https/, 'wss') + `/ws/${videoId}`;
 
-        console.log(`Connecting to WebSocket: ${wsUrl}`);
         const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
-            console.log('WebSocket Connected');
             setIsConnected(true);
             setError(null);
         };
@@ -26,10 +24,8 @@ export const useWebSocket = (videoId: number | null) => {
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                console.log('WebSocket message received:', data.type, data);
 
                 if (data.type === 'bboxes') {
-                    console.log('BBox message - PTS:', data.pts, 'BBoxes count:', data.bboxes?.length || 0);
                     // Add to buffer
                     // We keep a buffer of recent messages to sync with video
                     bboxBufferRef.current.push(data);
@@ -38,15 +34,12 @@ export const useWebSocket = (videoId: number | null) => {
                     if (bboxBufferRef.current.length > 500) {
                         bboxBufferRef.current.shift();
                     }
-                    console.log('BBox buffer size now:', bboxBufferRef.current.length);
                 } else if (data.type === 'stream_info') {
-                    console.log('Stream info received:', data);
+                    // Stream info received
                 } else if (data.type === 'pong') {
-                    // Heartbeat response, don't log
+                    // Heartbeat response
                 } else if (data.type === 'error') {
                     console.error('WebSocket Error Message:', data.message);
-                } else {
-                    console.log('Unknown message type:', data.type);
                 }
             } catch (e) {
                 console.error('Failed to parse WebSocket message', e, event.data);
@@ -59,12 +52,12 @@ export const useWebSocket = (videoId: number | null) => {
         };
 
         ws.onclose = () => {
-            console.log('WebSocket Disconnected');
             setIsConnected(false);
+            if (onDisconnect) onDisconnect();
         };
 
         wsRef.current = ws;
-    }, [videoId]);
+    }, [videoId, onDisconnect]);
 
     useEffect(() => {
         if (videoId !== null) {
@@ -73,6 +66,8 @@ export const useWebSocket = (videoId: number | null) => {
 
         return () => {
             if (wsRef.current) {
+                // Prevent triggering onDisconnect during manual cleanup
+                wsRef.current.onclose = null;
                 wsRef.current.close();
                 wsRef.current = null;
             }

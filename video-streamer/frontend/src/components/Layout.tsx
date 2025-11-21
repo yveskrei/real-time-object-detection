@@ -27,7 +27,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
                                 <Video className="w-6 h-6 text-primary" />
                             </div>
                             <h1 className="text-lg font-bold tracking-tight text-white">
-                                Stream<span className="text-primary">Flow</span>
+                                Video<span className="text-primary">Streamer</span>
                             </h1>
                         </div>
 

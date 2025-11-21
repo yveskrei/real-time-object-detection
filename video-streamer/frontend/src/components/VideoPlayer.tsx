@@ -5,9 +5,10 @@ import toast from 'react-hot-toast';
 interface VideoPlayerProps {
     manifestUrl: string;
     onResolutionChange: (width: number, height: number) => void;
+    onError?: (error: string) => void;
 }
 
-export const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({ manifestUrl, onResolutionChange }, ref) => {
+export const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({ manifestUrl, onResolutionChange, onError }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const playerRef = useRef<dashjs.MediaPlayerClass | null>(null);
 
@@ -18,34 +19,32 @@ export const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({ man
 
         // Prevent re-initialization if player already exists for this manifest
         if (playerRef.current) {
-            console.log('Player already initialized, skipping...');
             return;
         }
 
-        console.log('Initializing dash.js player for:', manifestUrl);
         const player = dashjs.MediaPlayer().create();
 
         // Configure for low-latency live streaming
         player.updateSettings({
             streaming: {
                 delay: {
-                    liveDelay: 4.0 // 4.0 seconds target latency for better buffering
+                    liveDelay: 6.0 // Increased to 6.0s (3 segments) for stability
                 },
                 liveCatchup: {
                     mode: 'liveCatchupModeDefault',
-                    enabled: true,
+                    enabled: false, // Disabled to prevent speed-up/high FPS
                     maxDrift: 0,
                     playbackRate: {
-                        min: -0.5,
-                        max: 0.5
+                        min: 0,
+                        max: 0
                     }
                 },
-                manifestUpdateRetryInterval: 5000, // Check for manifest updates every 5 seconds
+                manifestUpdateRetryInterval: 1000, // Check for manifest updates every 1 second
                 retryIntervals: {
-                    MPD: 5000, // Retry MPD download every 5s if failed
+                    MPD: 1000, // Retry MPD download every 1s if failed
                 },
                 retryAttempts: {
-                    MPD: 3,
+                    MPD: 2, // Give up after 2 retries
                 },
                 abr: {
                     limitBitrateByPortal: true,
@@ -64,10 +63,18 @@ export const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({ man
 
         // Error handling
         player.on(dashjs.MediaPlayer.events.ERROR, (e: any) => {
-            console.error('Dash.js Error:', e);
             // Only toast critical errors to avoid spam
             if (e.error === 'capability' || e.error === 'mediasource' || e.error === 'key_session') {
                 toast.error(`Playback Error: ${e.event ? e.event.message : 'Unknown error'}`);
+            } else {
+                // Log other errors for debugging
+                console.error('Dash.js Error:', e);
+            }
+
+            // Handle stream end (404 on manifest update usually means stream stopped)
+            // Broadened check: any download error
+            if (e.error === 'download') {
+                if (onError) onError('Stream stopped');
             }
         });
 
@@ -82,7 +89,6 @@ export const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({ man
         videoRef.current.addEventListener('resize', handleResize);
 
         return () => {
-            console.log('Cleaning up dash.js player');
             // Proper cleanup sequence to avoid DOMException
             if (videoRef.current) {
                 videoRef.current.removeEventListener('loadedmetadata', handleResize);
@@ -104,7 +110,7 @@ export const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({ man
     return (
         <video
             ref={videoRef}
-            controls
+            disablePictureInPicture
             className="w-full h-full bg-black"
             style={{ objectFit: 'contain', maxWidth: '100%', maxHeight: '100%' }}
         />
