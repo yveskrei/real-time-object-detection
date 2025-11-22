@@ -536,11 +536,11 @@ impl SourceProcessor {
                 &kafka_frame,
                 &kafka_bboxes
             ).await {
-                tracing::warn!(
-                    source_id=&*kafka_source_id,
-                    error=e.to_string(),
-                    "Failed to populate bboxes to Kafka"
-                );
+                // tracing::warn!(
+                //     source_id=&*kafka_source_id,
+                //     error=e.to_string(),
+                //     "Failed to populate bboxes to Kafka"
+                // );
             };
         });
     }
@@ -563,11 +563,11 @@ impl SourceProcessor {
                 &kafka_frame,
                 &kafka_embeddings
             ).await {
-                tracing::warn!(
-                    source_id=&*kafka_source_id,
-                    error=e.to_string(),
-                    "Failed to populate embeddings to Kafka"
-                );
+                // tracing::warn!(
+                //     source_id=&*kafka_source_id,
+                //     error=e.to_string(),
+                //     "Failed to populate embeddings to Kafka"
+                // );
             };
         });
     }

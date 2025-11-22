@@ -3,7 +3,7 @@ The following repository is a collection of production grade scripts allowing yo
 You will be able to deploy such system at a large scale, leveraging hardware to its limit, while maintaining lightweight and fast software.
 
 **View for end users**:<br>
-<img src="assets/video-streamer-ui.png" alt="Video Streamer UI" width="700"/>
+<img src="assets/video-player-frontend-2.png" alt="Video Streamer UI" width="700"/>
 
 ## Triton Server Client
 The [`client-triton`](client-triton) folder includes a real time object detection inference system based on **NVIDIA's Triton Server**.<br>
