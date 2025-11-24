@@ -44,7 +44,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex="https?://.*",
+    allow_origin_regex=".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -119,7 +119,7 @@ async def websocket_endpoint(websocket: WebSocket, video_id: int):
     finally:
         await ws_manager.disconnect(websocket, video_id)
 
-@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
+@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH"])
 async def catch_all(full_path: str):
     """Catch all unhandled routes"""
     raise HTTPException(status_code=404, detail=f"Route not found: {full_path}")

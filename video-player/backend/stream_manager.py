@@ -118,12 +118,17 @@ class StreamManager:
         
         cmd = [
             "ffmpeg",
+            "-probesize", "50M",
+            "-analyzeduration", "100M",
+            "-err_detect", "ignore_err",
             "-re",
             "-stream_loop", "-1",
+            "-fflags", "+genpts",
             "-i", file_path,
             "-filter_complex", f"[0:v]fps=fps={output_fps}[v_base]; [v_base]split=2[v_dash][v_udp]",
             
-            "-map", "[v_dash]", "-map", "0:a",
+            "-map", "[v_dash]",
+            "-an",  # Explicitly disable audio
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
             "-preset", "veryfast",
@@ -132,8 +137,6 @@ class StreamManager:
             "-maxrate", "2M",
             "-bufsize", "4M",
             "-g", str(int(output_fps * 2)),
-            "-c:a", "aac",
-            "-b:a", "128k",
             "-f", "dash",
             "-seg_duration", str(StreamManager.DASH_SEGMENT_DURATION),
             "-window_size", str(StreamManager.DASH_WINDOW_SIZE),
