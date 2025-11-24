@@ -25,7 +25,12 @@ export const Management: React.FC = () => {
         try {
             setLoading(true);
             const data = await listVideos();
-            setVideos(data);
+            if (Array.isArray(data)) {
+                setVideos(data);
+            } else {
+                console.error('Received invalid videos data:', data);
+                setVideos([]);
+            }
         } catch (error) {
             console.error('Failed to fetch videos', error);
             toast.error('Failed to fetch videos');
