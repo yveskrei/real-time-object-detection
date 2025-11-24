@@ -41,17 +41,33 @@ class StreamManager:
     
     @staticmethod
     def _consume_stderr(video_id: int, process):
-        """Consume stderr to prevent buffer blocking"""
+        """Consume stderr and terminate stream on ANY error"""
         logger.info(f"[Stream {video_id}] Starting stderr consumer thread")
+        
         try:
             for line in iter(process.stderr.readline, b''):
                 if not line:
                     break
+                    
                 line_str = line.decode('utf-8', errors='ignore').strip()
+                
+                # Log all output at DEBUG level
+                logger.debug(f"[Stream {video_id}] FFmpeg: {line_str}")
+                
+                # Check for ANY error - terminate immediately
                 if 'error' in line_str.lower() and 'configuration:' not in line_str.lower():
-                    logger.error(f"[Stream {video_id}] FFmpeg error: {line_str}")
+                    logger.error(f"[Stream {video_id}] ERROR detected, terminating stream: {line_str}")
+                    try:
+                        # Terminate the process immediately
+                        pgid = os.getpgid(process.pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                        logger.info(f"[Stream {video_id}] Sent SIGTERM to process group")
+                    except (ProcessLookupError, OSError) as e:
+                        logger.warning(f"[Stream {video_id}] Could not terminate process: {e}")
+                    break
                 elif 'warning' in line_str.lower():
                     logger.warning(f"[Stream {video_id}] FFmpeg warning: {line_str}")
+                    
         except Exception as e:
             # This can happen normally when process is killed
             logger.info(f"[Stream {video_id}] Stderr consumer thread finished: {e}")
@@ -128,7 +144,7 @@ class StreamManager:
             "-filter_complex", f"[0:v]fps=fps={output_fps}[v_base]; [v_base]split=2[v_dash][v_udp]",
             
             "-map", "[v_dash]",
-            "-an",  # Explicitly disable audio
+            "-an",  # Explicitly disable audio output
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
             "-preset", "veryfast",
@@ -144,6 +160,7 @@ class StreamManager:
             "-remove_at_exit", "1",
             "-streaming", "1",
             "-ldash", "1",
+            "-loglevel", "verbose",  # More detailed logging
             str(dash_manifest),
             
             # UDP output (for AI analytics)
@@ -186,15 +203,44 @@ class StreamManager:
         stderr_thread.start()
         StreamManager._stderr_threads[video_id] = stderr_thread
         
-        time.sleep(2)
+        # Wait for stream to initialize and validate
+        time.sleep(3)
         
         if process.poll() is not None:
             logger.error(f"[Stream {video_id}] Process died immediately after start")
-            del storage.active_streams[video_id]
-            storage.videos[video_id]["is_streaming"] = False
+            # Clean up
+            if video_id in storage.active_streams:
+                del storage.active_streams[video_id]
+            if video_id in storage.videos:
+                storage.videos[video_id]["is_streaming"] = False
+            if video_id in StreamManager._stderr_threads:
+                del StreamManager._stderr_threads[video_id]
             raise HTTPException(
                 status_code=500, 
-                detail="FFmpeg process died immediately after start. Check video file integrity and logs."
+                detail="FFmpeg process died immediately after start. Video file may be corrupted or invalid."
+            )
+        
+        # Validate DASH manifest was created
+        if not dash_manifest.exists():
+            logger.error(f"[Stream {video_id}] DASH manifest not created")
+            # Terminate process and clean up
+            try:
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                process.wait(timeout=5)
+            except:
+                pass
+            
+            if video_id in storage.active_streams:
+                del storage.active_streams[video_id]
+            if video_id in storage.videos:
+                storage.videos[video_id]["is_streaming"] = False
+            if video_id in StreamManager._stderr_threads:
+                del StreamManager._stderr_threads[video_id]
+            
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to create DASH manifest. Stream initialization failed."
             )
         
         logger.info(f"[Stream {video_id}] Stream started successfully")
@@ -309,7 +355,9 @@ class StreamManager:
             # Check if stream exists (it should if client_counts just hit zero)
             if video_id not in storage.active_streams:
                 logger.warning(f"[Stream {video_id}] Stop called, client count is zero, but stream not in active_streams")
-                storage.videos[video_id]["is_streaming"] = False # Ensure consistency
+                # Ensure consistency - defensive check
+                if video_id in storage.videos:
+                    storage.videos[video_id]["is_streaming"] = False
                 return {
                     "video_id": video_id,
                     "status": "already_stopped"
@@ -336,9 +384,11 @@ class StreamManager:
             except (ProcessLookupError, OSError) as e:
                 logger.warning(f"[Stream {video_id}] Process cleanup error: {e}")
             
-            # Clean up storage
-            del storage.active_streams[video_id]
-            storage.videos[video_id]["is_streaming"] = False
+            # Clean up storage - defensive checks
+            if video_id in storage.active_streams:
+                del storage.active_streams[video_id]
+            if video_id in storage.videos:
+                storage.videos[video_id]["is_streaming"] = False
             
             # Clean up stderr thread
             if video_id in StreamManager._stderr_threads:
@@ -396,9 +446,13 @@ class StreamManager:
                 
                 if poll_result is not None:
                     # Process died unexpectedly
-                    logger.warning(f"[Stream {video_id}] Detected dead process during status check")
-                    del storage.active_streams[video_id]
-                    storage.videos[video_id]["is_streaming"] = False
+                    logger.warning(f"[Stream {video_id}] Detected dead process during status check (exit code: {poll_result})")
+                    
+                    # Clean up storage - defensive checks
+                    if video_id in storage.active_streams:
+                        del storage.active_streams[video_id]
+                    if video_id in storage.videos:
+                        storage.videos[video_id]["is_streaming"] = False
                     
                     # Clean up client count if it's still > 0
                     if video_id in StreamManager._client_counts:
@@ -424,7 +478,9 @@ class StreamManager:
                     del StreamManager._client_counts[video_id]
                     result["clients"] = 0
                 
-                storage.videos[video_id]["is_streaming"] = False
+                # Ensure consistency - defensive check
+                if video_id in storage.videos:
+                    storage.videos[video_id]["is_streaming"] = False
         
         return result
     
