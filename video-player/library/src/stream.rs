@@ -64,16 +64,24 @@ unsafe impl Sync for Callbacks {}
 pub static STREAM_MANAGER: OnceLock<Arc<StreamManager>> = OnceLock::new();
 
 pub fn get_stream_manager() -> &'static Arc<StreamManager> {
-    STREAM_MANAGER.get_or_init(|| Arc::new(StreamManager::new()))
+    STREAM_MANAGER.get_or_init(|| {
+        match StreamManager::new() {
+            Ok(manager) => Arc::new(manager),
+            Err(e) => {
+                eprintln!("Failed to initialize StreamManager: {}", e);
+                panic!("Failed to initialize StreamManager: {}", e);
+            }
+        }
+    })
 }
 
 impl StreamManager {
-    fn new() -> Self {
-        Self {
+    fn new() -> Result<Self> {
+        Ok(Self {
             streams: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(None),
-            player_session: PlayerSession::default(),
-        }
+            player_session: PlayerSession::new()?,
+        })
     }
 
     pub fn set_callbacks(
