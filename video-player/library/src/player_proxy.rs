@@ -22,7 +22,7 @@ pub struct StreamStatus {
     pub error: Option<String>,
     pub clients: Option<i32>,
     pub status: Option<String>,
-    pub udp: Option<RawStreamInfo>,
+    pub relay: Option<RawStreamInfo>,
     pub dash: Option<DashInfo>
 }
 
