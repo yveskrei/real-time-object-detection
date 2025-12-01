@@ -20,15 +20,11 @@ const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 // Info for the raw video stream
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RawStreamInfo {
-    pub protocol: Option<String>,
-    pub host: Option<String>,
     pub port: u16,
     pub width: u32,
     pub height: u32,
     pub pix_fmt: String,
     pub fps: f64,
-    pub bytes_per_pixel: u16,
-    pub frame_size_bytes: u32,
 }
 
 // Source status codes for C FFI
@@ -431,7 +427,11 @@ fn process_stream(
     .context("Failed to create scaler")?;
     
     // Process the first frame we already decoded
-    let mut rgb_frame = ffmpeg::util::frame::video::Video::empty();
+    let mut rgb_frame = ffmpeg::util::frame::video::Video::new(
+        ffmpeg::format::Pixel::RGB24,
+        width,
+        height
+    );
     if scaler.run(&first_frame, &mut rgb_frame).is_ok() {
         let pts = first_frame.pts().unwrap_or(0);
         let data_ptr = rgb_frame.data(0).as_ptr();
@@ -461,7 +461,11 @@ fn process_stream(
             
             while decoder.receive_frame(&mut decoded_frame).is_ok() {
                 
-                let mut rgb_frame = ffmpeg::util::frame::video::Video::empty();
+                let mut rgb_frame = ffmpeg::util::frame::video::Video::new(
+                    ffmpeg::format::Pixel::RGB24,
+                    width,
+                    height
+                );
                 
                 // Scale to RGB24
                 if let Err(e) = scaler.run(&decoded_frame, &mut rgb_frame) {
