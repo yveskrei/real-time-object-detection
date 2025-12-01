@@ -25,7 +25,12 @@ export const Management: React.FC = () => {
         try {
             setLoading(true);
             const data = await listVideos();
-            setVideos(data);
+            if (Array.isArray(data)) {
+                setVideos(data);
+            } else {
+                console.error('Received invalid videos data:', data);
+                setVideos([]);
+            }
         } catch (error) {
             console.error('Failed to fetch videos', error);
             toast.error('Failed to fetch videos');
@@ -374,10 +379,10 @@ export const Management: React.FC = () => {
                                     </p>
                                 </div>
                                 <div>
-                                    <p className="text-xs uppercase tracking-wider text-zinc-500 font-semibold mb-1">UDP Port</p>
-                                    <p className="font-mono text-xs text-orange-400 bg-zinc-900/50 p-2 rounded inline-block">
-                                        {status.udp?.port || 'N/A'}
-                                    </p>
+                                    <p className="text-xs uppercase tracking-wider text-zinc-500 font-semibold mb-1">TCP Port</p>
+                                    <div className="font-mono text-sm text-zinc-300 bg-zinc-900/50 px-2 py-1 rounded border border-zinc-800 inline-block">
+                                        {status.relay?.port || 'N/A'}
+                                    </div>
                                 </div>
                             </div>
                         </div>

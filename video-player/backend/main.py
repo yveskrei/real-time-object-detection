@@ -44,7 +44,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -77,9 +77,7 @@ async def serve_dash_file(video_id: int, filename: str):
         path=file_path,
         media_type=media_type,
         headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Expose-Headers": "*"
+            "Cache-Control": "no-cache, no-store, must-revalidate"
         }
     )
 
@@ -120,6 +118,11 @@ async def websocket_endpoint(websocket: WebSocket, video_id: int):
                 break
     finally:
         await ws_manager.disconnect(websocket, video_id)
+
+@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH"])
+async def catch_all(full_path: str):
+    """Catch all unhandled routes"""
+    raise HTTPException(status_code=404, detail=f"Route not found: {full_path}")
 
 if __name__ == "__main__":
     import uvicorn

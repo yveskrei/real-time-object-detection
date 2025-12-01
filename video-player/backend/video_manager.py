@@ -58,6 +58,8 @@ class VideoManager:
             if fps <= 0:
                 raise ValueError(f"Invalid fps: {fps}")
             
+            logger.info(f"Video properties for {file_path}: {width}x{height} @ {fps:.2f} fps")
+            
             return {
                 "width": int(width),
                 "height": int(height),
@@ -123,7 +125,7 @@ class VideoManager:
         storage.videos[video_id] = video_data
         storage.bboxes[video_id] = {}
         
-        logger.info(f"Video {video_id} created: {video_name} ({properties['width']}x{properties['height']} @ {properties['fps']} fps)")
+        logger.info(f"Video {video_id} created: {video_name} ({properties['width']}x{properties['height']} @ {properties['fps']:.2f} fps)")
         
         return VideoInfo(**video_data)
     
@@ -137,7 +139,10 @@ class VideoManager:
     @staticmethod
     def list_videos() -> list[VideoInfo]:
         """List all videos"""
-        return [VideoInfo(**v) for v in storage.videos.values()]
+        # Create a snapshot to avoid race conditions during iteration
+        # when other threads modify storage.videos
+        videos_snapshot = list(storage.videos.values())
+        return [VideoInfo(**v) for v in videos_snapshot]
     
     @staticmethod
     def delete_video(video_id: int) -> dict:

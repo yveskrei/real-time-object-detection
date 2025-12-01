@@ -64,16 +64,24 @@ unsafe impl Sync for Callbacks {}
 pub static STREAM_MANAGER: OnceLock<Arc<StreamManager>> = OnceLock::new();
 
 pub fn get_stream_manager() -> &'static Arc<StreamManager> {
-    STREAM_MANAGER.get_or_init(|| Arc::new(StreamManager::new()))
+    STREAM_MANAGER.get_or_init(|| {
+        match StreamManager::new() {
+            Ok(manager) => Arc::new(manager),
+            Err(e) => {
+                eprintln!("Failed to initialize StreamManager: {}", e);
+                panic!("Failed to initialize StreamManager: {}", e);
+            }
+        }
+    })
 }
 
 impl StreamManager {
-    fn new() -> Self {
-        Self {
+    fn new() -> Result<Self> {
+        Ok(Self {
             streams: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(None),
-            player_session: PlayerSession::default(),
-        }
+            player_session: PlayerSession::new()?,
+        })
     }
 
     pub fn set_callbacks(
@@ -152,12 +160,12 @@ impl StreamManager {
                             continue;
                         }
 
-                        // UPDATED: Get raw stream info from 'udp' block
-                        let raw_stream_info = match status.udp {
+                        // UPDATED: Get raw stream info from 'relay' block
+                        let raw_stream_info = match status.relay {
                             Some(info) => info,
                             None => {
                                 // UPDATED: Log message
-                                log_error!("[Source {}] No raw stream info ('udp' block) available from backend", source_id);
+                                log_error!("[Source {}] No raw stream info ('relay' block) available from backend", source_id);
                                 (callbacks.source_status)(source_id, SourceStatus::ConnectionError as i32);
                                 sleep(STREAM_TIMEOUT).await;
                                 continue;
@@ -171,8 +179,8 @@ impl StreamManager {
                             (callbacks.source_name)(source_id, name_cstr.into_raw());
                         }
 
-                        // UPDATED: Log for UDP
-                        log_info!("[Source {}] Stream active, connecting to udp://{}:{}", 
+                        // UPDATED: Log for TCP
+                        log_info!("[Source {}] Stream active, connecting to tcp://{}:{}", 
                                  source_id, host, raw_stream_info.port);
                         (callbacks.source_status)(source_id, SourceStatus::Ok as i32);
 
@@ -295,20 +303,18 @@ fn decode_stream(
     callbacks: Callbacks, 
     stop_signal: Arc<AtomicBool>,
 ) -> Result<()> {
-    // UPDATED: Connect to UDP stream with reuse=1
-    let connection_url = format!("udp://{}:{}?reuse=1", host, stream_info.port);
+    // UPDATED: Connect to TCP stream
+    let connection_url = format!("tcp://{}:{}", host, stream_info.port);
 
-    log_info!("[Source {}] Connecting to UDP stream: {}", source_id, connection_url);
+    log_info!("[Source {}] Connecting to TCP stream: {}", source_id, connection_url);
 
     let mut input_opts = ffmpeg::Dictionary::new();
     input_opts.set("analyzeduration", "500000"); // 0.5s
     input_opts.set("probesize", "500000"); // 500KB
     input_opts.set("fflags", "nobuffer");
     input_opts.set("flags", "low_delay");
-    // Set UDP timeout to 3 seconds (in microseconds)
-    // This ensures that if the stream stops sending data, we don't block forever
-    // and can release the port.
-    input_opts.set("timeout", "3000000");
+    // Set TCP read/write timeout to 3 seconds (in microseconds)
+    input_opts.set("rw_timeout", "3000000");
     // We let FFmpeg auto-detect format (mpegts) and codec (h264)
 
     let mut last_error = None;
@@ -318,13 +324,13 @@ fn decode_stream(
         // We pass options, but don't force rawvideo
         match ffmpeg::format::input_with_dictionary(&connection_url, input_opts.clone()) {
             Ok(mut ictx) => {
-                log_info!("[Source {}] Successfully connected to UDP stream", source_id);
+                log_info!("[Source {}] Successfully connected to TCP stream", source_id);
                 // process_stream will decode, scale to RGB24, and call callbacks
                 let result = process_stream(source_id, &mut ictx, callbacks, stop_signal.clone());
                 
-                // Explicitly drop the input context to ensure UDP socket is released
+                // Explicitly drop the input context to ensure TCP socket is released
                 drop(ictx);
-                log_debug!("[Source {}] FFmpeg input context dropped, UDP port released", source_id);
+                log_debug!("[Source {}] FFmpeg input context dropped, TCP connection closed", source_id);
                 
                 return result;
             }
@@ -339,7 +345,7 @@ fn decode_stream(
     }
     
     // UPDATED: Error message
-    Err(last_error.unwrap()).context(format!("Failed to open UDP stream after 3 attempts"))
+    Err(last_error.unwrap()).context(format!("Failed to open TCP stream after 3 attempts"))
 }
 
 // This function decodes the mpegts/h264 stream and scales it to RGB24

@@ -22,12 +22,12 @@ pub struct StreamStatus {
     pub error: Option<String>,
     pub clients: Option<i32>,
     pub status: Option<String>,
-    pub udp: Option<RawStreamInfo>,
+    pub relay: Option<RawStreamInfo>,
     pub dash: Option<DashInfo>
 }
 
 /// HTTP session for communicating with the player backend
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PlayerSession {
     client: Client,
     base_url: String,
@@ -41,6 +41,7 @@ impl PlayerSession {
         
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .danger_accept_invalid_certs(true)
             .build()
             .context("Failed to build HTTP client")?;
         
@@ -78,17 +79,5 @@ impl PlayerSession {
             .context("Failed to parse stream status response")?;
 
         Ok(status)
-    }
-}
-
-impl Default for PlayerSession {
-    fn default() -> Self {
-        Self::new().unwrap_or_else(|_| {
-            let client = Client::new();
-            Self {
-                client,
-                base_url: "".to_string(),
-            }
-        })
     }
 }

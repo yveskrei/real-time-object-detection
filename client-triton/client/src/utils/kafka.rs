@@ -96,10 +96,15 @@ impl Kafka {
 
     pub async fn populate_embeddings(source_id: &str, frame: &RawFrame, embeddings: &[ResultEmbedding]) -> Result<()>{
         let producer = get_kafka_producer()?;
-        let data: Vec<u8> = embeddings
-            .iter()
-            .flat_map(|e| e.get_raw_bytes())
-            .collect();
+        
+        let payload = serde_json::json!({
+            "source_id": source_id,
+            "embeddings": embeddings.iter().map(|e| &e.data).collect::<Vec<_>>(),
+            "frame": &frame.data
+        });
+
+        let data = serde_json::to_string(&payload)
+            .context("Error serializing embedding payload")?;
 
         producer.produce(
             &producer.config.topic_embedding, 
