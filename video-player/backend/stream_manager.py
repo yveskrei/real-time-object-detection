@@ -8,15 +8,17 @@ from pathlib import Path
 from fastapi import HTTPException
 from storage import storage
 from websocket_manager import manager as ws_manager
+from tcp_relay import TCPRelay
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class StreamManager:
-    """Handles FFmpeg streaming with DASH output and UDP raw frames for AI"""
+    """Handles FFmpeg streaming with DASH output and TCP Relay for AI"""
     
     DASH_OUTPUT_DIR = Path("./dash_streams")
-    UDP_BASE_PORT = 9000  # Base port for raw streams
+    TCP_EXTERNAL_BASE_PORT = 9000  # Base port for external clients (AI) - TCP
+    UDP_INTERNAL_BASE_PORT = 19000 # Base port for internal FFmpeg -> Relay (UDP)
     
     # DASH segment retention settings
     DASH_SEGMENT_DURATION = 2  # seconds
@@ -25,13 +27,18 @@ class StreamManager:
     _stderr_threads = {}
     _stream_locks = {}
     _client_counts = {}
+    _relays = {} # Store active TCPRelay instances
     
     def __init__(self):
         self.DASH_OUTPUT_DIR.mkdir(exist_ok=True)
     
     @staticmethod
-    def _get_udp_port(video_id: int) -> int:
-        return StreamManager.UDP_BASE_PORT + video_id
+    def _get_ports(video_id: int) -> tuple[int, int]:
+        """Returns (internal_udp_port, external_tcp_port)"""
+        return (
+            StreamManager.UDP_INTERNAL_BASE_PORT + video_id,
+            StreamManager.TCP_EXTERNAL_BASE_PORT + video_id
+        )
     
     @staticmethod
     def _get_lock(video_id: int) -> threading.Lock:
@@ -55,7 +62,7 @@ class StreamManager:
                 logger.debug(f"[Stream {video_id}] FFmpeg: {line_str}")
                 
                 # Check for ANY error - terminate immediately
-                if 'error' in line_str.lower() and 'configuration:' not in line_str.lower():
+                if 'error' in line_str.lower() and 'configuration:' not in line_str.lower() and '0 decode errors' not in line_str.lower():
                     logger.error(f"[Stream {video_id}] ERROR detected, terminating stream: {line_str}")
                     try:
                         # Terminate the process immediately
@@ -101,32 +108,36 @@ class StreamManager:
     
     @staticmethod
     def _start_ffmpeg_process(video_id: int) -> dict:
-        """Start FFmpeg process for both DASH and UDP streaming"""
+        """Start FFmpeg process for both DASH and TCP Relay streaming"""
         video_data = storage.videos[video_id]
         file_path = video_data["file_path"]
         
         # Validate video properties
         StreamManager._validate_video_properties(video_data)
         
-        udp_port = StreamManager._get_udp_port(video_id)
+        internal_port, external_port = StreamManager._get_ports(video_id)
         stream_start_time = int(time.time() * 1000)
         
         output_width = video_data["width"]
         output_height = video_data["height"]
         output_fps = video_data["fps"]
         
-        udp_info = {
-            "port": udp_port,
+        relay_info = {
+            "port": external_port,
             "width": output_width,
             "height": output_height,
             "pix_fmt": "rgb24",
             "fps": output_fps,
-            "bytes_per_pixel": 3,
-            "frame_size_bytes": output_width * output_height * 3
         }
         
         logger.info(f"[Stream {video_id}] Starting stream from {file_path}")
-        logger.info(f"[Stream {video_id}] AI (UDP) Info: {udp_info}")
+        logger.info(f"[Stream {video_id}] Relay Info: {relay_info}")
+        
+        # Start TCP Relay
+        relay = TCPRelay(internal_port, external_port)
+        relay.start()
+        StreamManager._relays[video_id] = relay
+        logger.info(f"[Stream {video_id}] TCP Relay started")
         
         dash_dir = StreamManager.DASH_OUTPUT_DIR / str(video_id)
         dash_dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +174,7 @@ class StreamManager:
             "-loglevel", "verbose",  # More detailed logging
             str(dash_manifest),
             
-            # UDP output (for AI analytics)
+            # UDP output (to Internal Relay Port)
             "-map", "[v_udp]",
             "-c:v", "libx264",
             "-preset", "ultrafast",
@@ -171,7 +182,7 @@ class StreamManager:
             "-pix_fmt", "yuv420p",
             "-f", "mpegts",
             "-mpegts_copyts", "1",
-            f"udp://127.0.0.1:{udp_port}"
+            f"udp://127.0.0.1:{internal_port}?pkt_size=1316"
         ]
         
         logger.debug(f"[Stream {video_id}] FFmpeg command: {' '.join(cmd)}")
@@ -190,7 +201,7 @@ class StreamManager:
         storage.active_streams[video_id] = {
             'process': process,
             'start_time_ms': stream_start_time,
-            'udp_info': udp_info,
+            'relay_info': relay_info,
             'dash_manifest': str(dash_manifest)
         }
         storage.videos[video_id]["is_streaming"] = True
@@ -209,6 +220,9 @@ class StreamManager:
         if process.poll() is not None:
             logger.error(f"[Stream {video_id}] Process died immediately after start")
             # Clean up
+            if video_id in StreamManager._relays:
+                StreamManager._relays[video_id].stop()
+                del StreamManager._relays[video_id]
             if video_id in storage.active_streams:
                 del storage.active_streams[video_id]
             if video_id in storage.videos:
@@ -231,6 +245,9 @@ class StreamManager:
             except:
                 pass
             
+            if video_id in StreamManager._relays:
+                StreamManager._relays[video_id].stop()
+                del StreamManager._relays[video_id]
             if video_id in storage.active_streams:
                 del storage.active_streams[video_id]
             if video_id in storage.videos:
@@ -250,7 +267,7 @@ class StreamManager:
             "status": "streaming",
             "stream_start_time_ms": stream_start_time,
             "pid": process.pid,
-            "udp": udp_info,
+            "relay": relay_info,
             "dash": {
                 "manifest_url": f"/dash/{video_id}/manifest.mpd"
             }
@@ -288,7 +305,7 @@ class StreamManager:
                         "status": "streaming",
                         "stream_start_time_ms": stream_data['start_time_ms'],
                         "pid": process.pid,
-                        "udp": stream_data['udp_info'],
+                        "relay": stream_data['relay_info'],
                         "dash": {
                             "manifest_url": f"/dash/{video_id}/manifest.mpd"
                         },
@@ -297,6 +314,9 @@ class StreamManager:
                 else:
                     # Process died, clean up and restart
                     logger.warning(f"[Stream {video_id}] Found dead stream, cleaning up and restarting")
+                    if video_id in StreamManager._relays:
+                        StreamManager._relays[video_id].stop()
+                        del StreamManager._relays[video_id]
                     del storage.active_streams[video_id]
                     storage.videos[video_id]["is_streaming"] = False
                     # Note: _client_counts[video_id] is preserved
@@ -320,6 +340,9 @@ class StreamManager:
                 
                 logger.error(f"[Stream {video_id}] Failed to start stream: {e}")
                 
+                if video_id in StreamManager._relays:
+                    StreamManager._relays[video_id].stop()
+                    del StreamManager._relays[video_id]
                 if video_id in storage.active_streams:
                     del storage.active_streams[video_id]
                 if video_id in storage.videos:
@@ -367,6 +390,12 @@ class StreamManager:
             process = stream_data['process']
             
             logger.info(f"[Stream {video_id}] Stopping stream (PID: {process.pid})")
+            
+            # Stop Relay
+            if video_id in StreamManager._relays:
+                logger.info(f"[Stream {video_id}] Stopping TCP Relay")
+                StreamManager._relays[video_id].stop()
+                del StreamManager._relays[video_id]
             
             # Terminate FFmpeg process
             try:
@@ -449,6 +478,9 @@ class StreamManager:
                     logger.warning(f"[Stream {video_id}] Detected dead process during status check (exit code: {poll_result})")
                     
                     # Clean up storage - defensive checks
+                    if video_id in StreamManager._relays:
+                        StreamManager._relays[video_id].stop()
+                        del StreamManager._relays[video_id]
                     if video_id in storage.active_streams:
                         del storage.active_streams[video_id]
                     if video_id in storage.videos:
@@ -467,10 +499,16 @@ class StreamManager:
                     result["status"] = "streaming"
                     result["stream_start_time_ms"] = stream_data['start_time_ms']
                     result["pid"] = process.pid
-                    result["udp"] = stream_data['udp_info']
+                    result["relay"] = stream_data['relay_info']
                     result["dash"] = {
                         "manifest_url": f"/dash/{video_id}/manifest.mpd"
                     }
+                    if video_id in StreamManager._relays:
+                        relay = StreamManager._relays[video_id]
+                        result["relay_clients"] = relay.get_client_count()
+                        result["relay_alive"] = relay.is_alive()
+                        if not relay.is_alive():
+                            result["warning"] = "TCP Relay thread is dead! Check logs."
             else:
                 # If it's not active, client count should be 0
                 if StreamManager._client_counts.get(video_id, 0) > 0:

@@ -10,7 +10,7 @@ export interface StreamStatus {
     dash: {
         manifest_url: string;
     } | null;
-    udp: {
+    relay: {
         port: number;
     } | null;
 }
