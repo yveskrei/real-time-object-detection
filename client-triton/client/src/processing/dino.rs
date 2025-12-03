@@ -102,10 +102,29 @@ pub fn preprocess_bboxes(
     
     for bbox in bboxes {
         // Extract bbox coordinates [x1, y1, x2, y2]
-        let x1 = bbox.bbox[0].max(0.0) as u32;
-        let y1 = bbox.bbox[1].max(0.0) as u32;
-        let x2 = (bbox.bbox[2].min(frame.width as f32)) as u32;
-        let y2 = (bbox.bbox[3].min(frame.height as f32)) as u32;
+        let mut b_x1 = bbox.bbox[0];
+        let mut b_y1 = bbox.bbox[1];
+        let mut b_x2 = bbox.bbox[2];
+        let mut b_y2 = bbox.bbox[3];
+
+        // Stretch bbox by 1.5x
+        let width = b_x2 - b_x1;
+        let height = b_y2 - b_y1;
+        let cx = b_x1 + width / 2.0;
+        let cy = b_y1 + height / 2.0;
+        
+        let new_width = width * 1.5;
+        let new_height = height * 1.5;
+        
+        b_x1 = cx - new_width / 2.0;
+        b_y1 = cy - new_height / 2.0;
+        b_x2 = cx + new_width / 2.0;
+        b_y2 = cy + new_height / 2.0;
+
+        let x1 = b_x1.max(0.0) as u32;
+        let y1 = b_y1.max(0.0) as u32;
+        let x2 = (b_x2.min(frame.width as f32)) as u32;
+        let y2 = (b_y2.min(frame.height as f32)) as u32;
         
         // Calculate bbox dimensions
         let bbox_width = x2.saturating_sub(x1);

@@ -200,21 +200,23 @@ export const Viewer: React.FC = () => {
         const retentionWindow = ptsPerFrame * retentionFrames; // How long to keep showing after match
 
         const activeBBoxes: BBox[] = [];
+        const MAX_PTS = 8589934592; // 2^33
 
         // Find bboxes where: bbox.pts <= currentPts < (bbox.pts + retentionWindow)
         for (let i = buffer.length - 1; i >= 0; i--) {
             const msg = buffer[i];
 
+            // Handle 33-bit PTS rollover
+            // Find the closest unwrapped PTS to the current video time
+            const diff = currentPts - msg.pts;
+            const k = Math.round(diff / MAX_PTS);
+            const unwrappedPts = msg.pts + (k * MAX_PTS);
+
             // Check if this bbox's PTS is within our retention window
-            if (msg.pts <= currentPts + tolerance && msg.pts >= currentPts - retentionWindow) {
+            if (unwrappedPts <= currentPts + tolerance && unwrappedPts >= currentPts - retentionWindow) {
                 activeBBoxes.push(...msg.bboxes);
             }
         }
-
-        // Reduced logging frequency
-        // if (Math.random() < 0.005) {
-        //     console.log('PTS:', currentPts.toFixed(0), 'Active bboxes:', activeBBoxes.length, 'Retention frames:', retentionFrames);
-        // }
 
         setActiveBBoxes(activeBBoxes);
         requestRef.current = requestAnimationFrame(animate);

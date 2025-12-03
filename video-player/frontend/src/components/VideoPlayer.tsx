@@ -23,10 +23,14 @@ export const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({ man
         }
 
         const player = dashjs.MediaPlayer().create();
+        player.clearDefaultUTCTimingSources();
 
         // Configure for low-latency live streaming
         player.updateSettings({
             streaming: {
+                utcSynchronization: {
+                    enabled: false
+                },
                 delay: {
                     liveDelay: 6.0 // Increased to 6.0s (3 segments) for stability
                 },
