@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, Extra
 from typing import Optional, List
 from datetime import datetime
 
@@ -22,9 +22,26 @@ class BBoxData(BaseModel):
     class_name: str = Field(..., description="Object class name")
     confidence: float = Field(..., ge=0, le=1, description="Detection confidence")
 
+class BoundingBox(BaseModel):
+    TopLeftPixelNumber: int
+    BottomRightPixelNumber: int
+
+class BBoxClientAI(BaseModel):
+    StartTime: int
+    BoundingBox: BoundingBox
+    Class: str
+    Confidence: float
+
+    class Config:
+        extra = Extra.ignore
+
 class BBoxCreate(BaseModel):
-    stream_id: int
-    bboxes: List[BBoxData]
+    SourceId: int
+    System: str
+    Data: List[BBoxClientAI]
+
+    class Config:
+        extra = Extra.ignore
 
 class StreamConfig(BaseModel):
     video_id: int

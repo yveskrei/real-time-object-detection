@@ -6,6 +6,7 @@ from models import VideoInfo
 import subprocess
 import json
 import logging
+import os
 
 # Variables
 logger = logging.getLogger(__name__)
@@ -29,9 +30,11 @@ class VideoManager:
         ]
         
         try:
+            print("I'm here!")
+
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             data = json.loads(result.stdout)
-            
+
             if not data.get("streams") or len(data["streams"]) == 0:
                 logger.error(f"ffprobe found no video streams for {file_path}")
                 raise ValueError("No video streams found in file")
@@ -77,7 +80,7 @@ class VideoManager:
             raise ValueError(f"Failed to get video properties: {str(e)}")
     
     @staticmethod
-    async def create_video(file: UploadFile, name: str) -> VideoInfo:
+    async def create_video( file: UploadFile, name: str) -> VideoInfo:
         """Upload and register a new video"""
         
         if not file.filename.endswith(('.mp4', '.avi', '.mov', '.mkv')):
@@ -88,13 +91,15 @@ class VideoManager:
         
         video_id = storage.get_next_video_id()
         video_name = name or file.filename
-        file_path = storage.video_storage_path / f"{video_id}.mp4"
+        file_path = os.getcwd() / storage.video_storage_path / f"{video_id}.mp4"
         
         # Save uploaded file
         try:
+            print(file_path)
             with open(file_path, "wb") as f:
                 content = await file.read()
                 f.write(content)
+            
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
