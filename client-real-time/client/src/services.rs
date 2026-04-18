@@ -35,7 +35,7 @@ pub async fn init_services(app_config: &AppConfig, runtime: tokio::runtime::Hand
     let services = Services::new(app_config, runtime).await
         .context("Error initiating Services")?;
 
-    // Set global variable
+    // Set global variable before start, so started tasks can read it
     SERVICES.set(Arc::new(services))
         .map_err(|_| anyhow::anyhow!("Error setting services"))?;
 
@@ -45,7 +45,7 @@ pub async fn init_services(app_config: &AppConfig, runtime: tokio::runtime::Hand
 pub struct Services {
     runtime: tokio::runtime::Handle,
     elastic: Elastic,
-    statistics: Statistics,
+    statistics: RwLock<Statistics>,
     inference_models: InferenceModels,
     source_processors: RwLock<SourceProcessors>,
     client_video: ClientVideo
@@ -60,8 +60,6 @@ impl Services {
         // Initiate inference models
         let inference_models = InferenceModels::new(&app_config).await
             .context("Error initiating inference models")?;
-        inference_models.start(&app_config).await
-            .context("Error starting inference models")?;
 
         // Initiate source processors
         let source_processors = SourceProcessors::new(&app_config)
@@ -74,19 +72,33 @@ impl Services {
         // Initiate client video
         let client_video = ClientVideo::new()
             .context("Error creating client video")?;
-        client_video.init_sources(&app_config).await
-            .context("Error initiating client video sources")?;
 
         Ok(
             Self {
                 runtime,
                 elastic,
-                statistics,
+                statistics: RwLock::new(statistics),
                 inference_models,
                 source_processors: RwLock::new(source_processors),
                 client_video
             }
         )
+    }
+
+    pub async fn start(&self, app_config: &AppConfig) -> Result<()> {
+        // Start statistics
+        self.statistics.write().await.start()
+            .context("Error starting statistics")?;
+
+        // Start models
+        self.inference_models.start(&app_config).await
+            .context("Error starting inference models")?;
+
+        // Start sources
+        self.client_video.init_sources(&app_config).await
+            .context("Error initiating client video sources")?;
+
+        Ok(())
     }
 }
 
@@ -99,7 +111,7 @@ impl Services {
         &self.elastic
     }
 
-    pub fn statistics(&self) -> &Statistics {
+    pub fn statistics(&self) -> &RwLock<Statistics> {
         &self.statistics
     }
 

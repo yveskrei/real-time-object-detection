@@ -16,24 +16,38 @@ while true; do
     fi
 done
 
+# Build client up front so APP_PID below is the real binary, not a cargo wrapper
+(cd client && cargo build --release)
+
 # Start Triton client application
 export PLAYER_BACKEND_URL="http://127.0.0.1:8702"
 export RUST_LOG=INFO
-cd client && cargo run --release &
-CARGO_PID=$!
+(cd client && exec ./target/release/client) &
+APP_PID=$!
 
 # Define cleanup function
 cleanup() {
-    kill $CARGO_PID 2>/dev/null
-    wait $CARGO_PID 2>/dev/null
+    if kill -0 "$APP_PID" 2>/dev/null; then
+        # Ask the app to shut down cleanly (it listens for SIGINT)
+        kill -INT "$APP_PID" 2>/dev/null || true
+
+        # Give it up to 5 seconds to exit gracefully
+        for _ in $(seq 1 50); do
+            kill -0 "$APP_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+
+        # Force kill if still alive
+        kill -KILL "$APP_PID" 2>/dev/null || true
+    fi
+    wait "$APP_PID" 2>/dev/null || true
 
     # Stop Triton Server
     docker compose -f ../docker-compose.yml down
-    exit
 }
 
-# Trap SIGINT and SIGTERM
-trap cleanup SIGINT SIGTERM EXIT
+# Cleanup on any exit path (Ctrl+C, SIGTERM, normal exit)
+trap cleanup EXIT
 
-# Wait for cargo process to finish
-wait $CARGO_PID
+# Wait for application to finish
+wait "$APP_PID"

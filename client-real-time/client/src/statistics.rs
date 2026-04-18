@@ -9,7 +9,7 @@ use crate::services;
 
 // Variables
 pub static SOURCE_STATS_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(1);
-pub static GPU_STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+pub static GPU_STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1000);
 
 /// Represents GPU statistics that are reported by the application
 pub struct GPUStats {
@@ -112,16 +112,24 @@ impl SourceStats {
 #[allow(dead_code)]
 pub struct Statistics {
     is_running: Arc<AtomicBool>,
-    source_stats_handle: tokio::task::JoinHandle<()>,
-    gpu_stats_handle: tokio::task::JoinHandle<()>,
+    source_stats_handle: Option<tokio::task::JoinHandle<()>>,
+    gpu_stats_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Statistics {
     pub fn new() -> Result<Self> {
-        let is_running = Arc::new(AtomicBool::new(true));
+        Ok(
+            Self {
+                is_running: Arc::new(AtomicBool::new(true)),
+                source_stats_handle: None,
+                gpu_stats_handle: None
+            }
+        )
+    }
 
+    pub fn start(&mut self) -> Result<()> {
         // Spawn an independent task to print source statistics
-        let source_stats_is_running = Arc::clone(&is_running);
+        let source_stats_is_running = Arc::clone(&self.is_running);
         let source_stats_interval = SOURCE_STATS_INTERVAL.clone();
         let source_stats_handle = tokio::task::spawn(async move {
             let mut interval = tokio::time::interval(source_stats_interval);
@@ -147,7 +155,7 @@ impl Statistics {
         });
 
         // Spawn an independent task to print GPU statistics
-        let gpu_stats_is_running = Arc::clone(&is_running);
+        let gpu_stats_is_running = Arc::clone(&self.is_running);
         let gpu_stats_interval = GPU_STATS_INTERVAL.clone();
         let gpu_stats_handle = tokio::task::spawn_blocking(move || {
             while gpu_stats_is_running.load(Ordering::Relaxed) {
@@ -165,13 +173,10 @@ impl Statistics {
             }
         });
 
-        Ok(
-            Self {
-                is_running,
-                source_stats_handle,
-                gpu_stats_handle
-            }
-        )
+        self.source_stats_handle = Some(source_stats_handle);
+        self.gpu_stats_handle = Some(gpu_stats_handle);
+
+        Ok(())
     }
     /// Returns statistics about the NVIDIA GPU installed on the machine
     pub fn get_gpu_statistics() -> Result<GPUStats> {
@@ -291,7 +296,11 @@ impl Drop for Statistics {
         self.is_running.store(false, Ordering::Relaxed);
 
         // Abort tokio tasks
-        self.source_stats_handle.abort();
-        self.gpu_stats_handle.abort();
+        if let Some(handle) = &self.source_stats_handle {
+            handle.abort();
+        }
+        if let Some(handle) = &self.gpu_stats_handle {
+            handle.abort();
+        }
     }
 }
