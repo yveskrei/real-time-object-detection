@@ -1,0 +1,122 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'services'
+layer: 'application'
+language: 'bash'
+stack: 'infrastructure'
+
+project:
+  name: 'Services'
+  description: 'Backing infrastructure for the analytics stack - Triton, Redis and the Elastic stack.'
+
+fileGroups:
+  compose:
+    - 'docker-compose-triton.yml'
+    - 'docker-compose-redis.yml'
+    - 'docker-compose-elastic.yml'
+
+# The compose files live alongside this file, so tasks run from this directory and
+# no task sets `runFromWorkspaceRoot`. That also keeps compose's project directory
+# (which it derives from the first `-f` file) equal to the working directory, so
+# relative host paths in the compose files resolve predictably - see the
+# `../triton_models` mounts in docker-compose-triton.yml.
+#
+# Each compose file pins `name: real-time-ai-analytics`, so the project name comes
+# from the file rather than from whichever directory it happens to sit in.
+tasks:
+  # --- Triton ------------------------------------------------------------
+  # Same compose file, selected by profile. GPU requires the NVIDIA container
+  # runtime; CPU works on any host.
+  #
+  # These run detached and block on `--wait`, so the task exits 0 only once the
+  # compose healthcheck reports Triton as serving. That is deliberate: moon never
+  # waits for a `persistent` task to finish, it starts dependents alongside it. By
+  # completing instead, these tasks let a `deps` edge genuinely gate startup, which
+  # is what `client-detection:cpu` / `:gpu` rely on.
+  #
+  # Consequence: Triton keeps running after the task returns. Use `triton-logs` to
+  # follow it and `triton-down` to stop it.
+  triton-gpu:
+    command: 'docker compose -f docker-compose-triton.yml --profile gpu up --detach --wait --wait-timeout 180'
+    options:
+      cache: false
+      runInCI: false
+
+  triton-cpu:
+    command: 'docker compose -f docker-compose-triton.yml --profile cpu up --detach --wait --wait-timeout 180'
+    options:
+      cache: false
+      runInCI: false
+
+  # Nothing streams Triton's output in the foreground anymore, so this is how you
+  # watch it. Both profiles are named so it attaches whichever variant is running.
+  triton-logs:
+    command: 'docker compose -f docker-compose-triton.yml --profile cpu --profile gpu logs --follow'
+    preset: 'server'
+
+  # `down` needs both profiles named, otherwise compose ignores the profiled
+  # services and leaves the container running.
+  triton-down:
+    command: 'docker compose -f docker-compose-triton.yml --profile cpu --profile gpu down'
+    options:
+      cache: false
+      runInCI: false
+
+  # --- Redis -------------------------------------------------------------
+  # Same detached-and-`--wait` shape as the Triton and Elastic tasks above, and
+  # for the same reason: a `persistent` task is never waited on, so only a
+  # completing task can actually gate `search:cpu` / `:gpu` behind a Redis that
+  # answers commands. `search` stores the uploaded image's embedding in Redis
+  # between upload and search, so starting it against a cold Redis is a hard
+  # failure, not a degraded mode.
+  #
+  # Redis boots in a second or two - the compose healthcheck polls every 2s - so
+  # this needs nothing like Triton's or Elastic's timeout.
+  #
+  # Consequence: Redis keeps running after the task returns. Use `redis-logs` to
+  # follow it and `redis-down` to stop it.
+  redis:
+    command: 'docker compose -f docker-compose-redis.yml up --detach --wait --wait-timeout 60'
+    options:
+      cache: false
+      runInCI: false
+
+  # Nothing streams Redis's output in the foreground anymore, so this is how you
+  # watch it.
+  redis-logs:
+    command: 'docker compose -f docker-compose-redis.yml logs --follow'
+    preset: 'server'
+
+  redis-down:
+    command: 'docker compose -f docker-compose-redis.yml down'
+    options:
+      cache: false
+      runInCI: false
+
+  # --- Elastic stack (elasticsearch + kibana + logstash) -----------------
+  # Same detached-and-`--wait` shape as the Triton tasks above, and for the same
+  # reason: a `persistent` task is never waited on, so only a completing task can
+  # actually gate `client-retrieval:cpu` / `:gpu` behind a ready cluster.
+  #
+  # `--wait` blocks on the healthchecks of all three services, and Kibana's
+  # migrations can take 60-90s from cold, hence the longer timeout than Triton's.
+  #
+  # Consequence: the stack keeps running after the task returns. Use `elastic-logs`
+  # to follow it and `elastic-down` to stop it.
+  elastic:
+    command: 'docker compose -f docker-compose-elastic.yml up --detach --wait --wait-timeout 300'
+    options:
+      cache: false
+      runInCI: false
+
+  # Nothing streams the stack's output in the foreground anymore, so this is how
+  # you watch it.
+  elastic-logs:
+    command: 'docker compose -f docker-compose-elastic.yml logs --follow'
+    preset: 'server'
+
+  elastic-down:
+    command: 'docker compose -f docker-compose-elastic.yml down'
+    options:
+      cache: false
+      runInCI: false

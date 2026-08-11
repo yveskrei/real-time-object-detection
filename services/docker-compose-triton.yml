@@ -1,0 +1,58 @@
+# Pinned so the compose project stays `real-time-ai-analytics` regardless of where
+# this file lives. Without it the project name is derived from this directory, and
+# moving the file would silently rename every network and named volume.
+name: real-time-ai-analytics
+
+# Shared Triton service definition. The two services below differ only in whether
+# the container is handed a GPU - everything else is identical.
+x-triton-base: &triton-base
+  image: nvcr.io/nvidia/tritonserver:25.09-py3
+  restart: unless-stopped
+  ports:
+    - "8000:8000"
+    - "8001:8001"
+    - "8002:8002"
+  # Gates `docker compose up --wait`, which is how the moon task only reports
+  # success once Triton is actually serving. Clients bail if they connect before
+  # the server is ready, so "container started" is not a useful signal on its own.
+  # Probed over HTTP (8000) even though inference uses gRPC (8001) - the server
+  # brings both up together, and this endpoint needs no extra tooling in the image.
+  # Under `--model-control-mode=explicit` no models load at boot, so readiness is
+  # reached quickly and does not depend on the model repository.
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 20s
+  # Relative to this file's directory (services/), so these reach the repository root.
+  volumes:
+    - ../triton_models:/models:rw
+    - ../triton_logs:/logs:rw
+  command: >
+    tritonserver
+    --model-repository=/models
+    --model-control-mode=explicit
+    --allow-http=true
+    --allow-grpc=true
+    --allow-metrics=true
+    --log-verbose=1
+    --log-file=/logs/triton.log
+    --exit-on-error=false
+    --strict-model-config=false
+    --backend-config=python,shm-default-byte-size=1048576
+
+services:
+  triton_gpu:
+    <<: *triton-base
+    container_name: triton_server_gpu
+    profiles: ["gpu"]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+
+  # No NVIDIA container runtime required, so this works on hosts without a GPU.
+  triton_cpu:
+    <<: *triton-base
+    container_name: triton_server_cpu
+    profiles: ["cpu"]

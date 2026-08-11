@@ -1,0 +1,49 @@
+# Pinned so the compose project name does not depend on this file's location.
+name: real-time-ai-analytics
+
+services:
+  redis:
+    image: redis:7.4.8
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass redis_admin
+      --maxmemory 512mb
+      --maxmemory-policy volatile-lru
+    # Gates `--wait` in the `services:redis` task, so dependents only start once
+    # Redis actually answers commands. `search` treats Redis as mandatory - it
+    # parks the uploaded image's embedding there between upload and search - so
+    # "container started" is not a useful signal on its own.
+    # redis-cli ships in the image (/usr/local/bin/redis-cli), no extra tooling
+    # needed, but the server runs with `--requirepass`, so an unauthenticated
+    # PING only gets `NOAUTH Authentication required.`
+    # The exit code alone is NOT enough here: redis-cli exits 0 on both NOAUTH and
+    # WRONGPASS, and only returns 1 when it cannot connect at all. So the reply is
+    # matched explicitly, which also catches this password drifting out of sync
+    # with `redis_config.password` in the clients' secrets/config.yaml.
+    # `--no-auth-warning` suppresses the "password on the command line" notice;
+    # that only ever went to stderr and never affected the exit code, but it keeps
+    # `docker inspect`'s health log readable.
+    # Redis is serving within a second or two, hence far tighter timings than the
+    # Elastic stack's.
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a redis_admin ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - redis_network
+
+volumes:
+  redis_data:
+
+networks:
+  redis_network:
+    driver: bridge

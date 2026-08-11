@@ -1,0 +1,16 @@
+$schema: 'https://moonrepo.dev/schemas/workspace.json'
+
+# Projects in this monorepo. Paths are relative to the workspace root.
+projects:
+  services: 'services'
+  client-detection: 'client-object-detection'
+  client-retrieval: 'client-image-retrieval'
+  # The crate lives in the inner `client/` directory, not at the repo folder root.
+  # That is load-bearing: `AppConfig::load_config_file` reads "secrets/config.yaml"
+  # and the log appender writes "logs/app.log", both relative to the process CWD,
+  # and both live under `client/`.
+  search: 'image-retrieval-search/client'
+
+vcs:
+  client: 'git'
+  defaultBranch: 'main'

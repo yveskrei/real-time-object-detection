@@ -1,0 +1,23 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.47.0", features = ["full"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.141"
+image = "0.25.6"
+triton-client = "0.2.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter", "time"] }
+anyhow = "1.0.98"
+nvml-wrapper = "0.11.0"
+tracing-appender = "0.2.3"
+libloading = "0.8.9"
+libc = "0.2.177"
+serde_yaml = "0.9.34"
+futures = "0.3.31"
+uuid = { version = "1", features = ["v4"] }
+elasticsearch = "9.1.0-alpha.1"
+chrono = "0.4.42"

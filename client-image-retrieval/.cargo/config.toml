@@ -1,0 +1,10 @@
+# `triton-client 0.2.0` pulls in `prost-build 0.10.4`, which vendors protobuf and
+# builds it with CMake. CMake >= 4.0 removed compatibility with the
+# `cmake_minimum_required(VERSION < 3.5)` that vendored protobuf declares, so the
+# build script fails before any of this crate is compiled.
+#
+# This makes `cargo build` work out of the box. The faster alternative is to install
+# protoc (`dnf install protobuf-compiler`) and set PROTOC_NO_VENDOR=1, which skips
+# building protobuf from source altogether.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

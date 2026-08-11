@@ -1,0 +1,4 @@
+$schema: 'https://moonrepo.dev/schemas/toolchain.json'
+
+# No language toolchains are managed by moon yet - the services project only
+# shells out to docker. Add `rust`, `python`, etc. here as projects are onboarded.

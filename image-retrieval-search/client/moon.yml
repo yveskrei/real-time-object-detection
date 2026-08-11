@@ -1,0 +1,67 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'search'
+layer: 'application'
+language: 'rust'
+
+project:
+  name: 'Image Retrieval Search'
+  description: 'Axum HTTP API that embeds an uploaded image with DINOv3 on Triton, caches the vector in Redis under a UUID, and serves kNN search against Elasticsearch.'
+
+# This is the query half of the system; `client-retrieval` is the ingest half.
+# `client-retrieval` writes embeddings into Elasticsearch from video frames, this
+# crate searches those same vectors on behalf of an HTTP caller.
+#
+# NOTE: like `client-retrieval`, and unlike `services`, no task here sets
+# `runFromWorkspaceRoot`. The default working directory (this crate) is required:
+# `AppConfig::load_config_file` reads "secrets/config.yaml" and the tracing
+# appender writes "logs/app.log", both relative to the process CWD.
+#
+# Startup ordering is handled entirely by the `services:*` deps. Those tasks run
+# `docker compose up --wait` and only exit once the compose healthchecks pass, so
+# by the time cargo runs all three backends are up. (A `persistent` service task
+# would NOT gate anything - moon starts dependents alongside persistent deps
+# rather than waiting on them, which is why `services:redis` was converted to a
+# completing task alongside `triton-*` and `elastic`.)
+#
+# All three backends are required here - this is the only client that needs the
+# full set:
+#
+#   - Triton is a hard requirement, same as in the other clients: the inference
+#     model checks the server is serving at startup and bails otherwise.
+#
+#   - Elasticsearch holds the vectors being searched. As in `client-retrieval`,
+#     the transport does not connect eagerly, so a dead node yields no startup
+#     error - just every search failing at request time.
+#
+#   - Redis is NOT optional, which is the difference from `client-retrieval`.
+#     The API is a two-step upload/search flow: the upload handler embeds the
+#     image and stores the vector in Redis under a generated UUID with a 120s
+#     TTL, and `GET /search` then looks that UUID back up to run the kNN query.
+#     With no Redis there is nowhere to park the embedding between the two
+#     calls, so search breaks outright rather than degrading.
+#
+# `device_type` in secrets/config.yaml is NOT switched by these tasks - it must be
+# set to match the task you run (CPU vs GPU), same as in the other clients.
+tasks:
+  cpu:
+    command: 'cargo run --release'
+    deps:
+      - 'services:triton-cpu'
+      - 'services:elastic'
+      - 'services:redis'
+    preset: 'server'
+    # The client filters with `EnvFilter::from_default_env()`, which produces a
+    # filter with no directives when RUST_LOG is unset - i.e. total silence.
+    env:
+      RUST_LOG: 'INFO'
+
+  gpu:
+    command: 'cargo run --release'
+    deps:
+      - 'services:triton-gpu'
+      - 'services:elastic'
+      - 'services:redis'
+    preset: 'server'
+    env:
+      RUST_LOG: 'INFO'

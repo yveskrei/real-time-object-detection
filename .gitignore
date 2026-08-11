@@ -78,8 +78,13 @@ htmlcov/
 *.pt
 *.pth
 
+# moon
+.moon/cache/
+.moon/docker/
+
 # Project-specific
 sources/
+models/
 *Cargo.lock
 *target/
 *triton_logs/

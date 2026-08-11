@@ -1,0 +1,98 @@
+# Pinned so the compose project name does not depend on this file's location.
+name: real-time-ai-analytics
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.3.0-SNAPSHOT
+    container_name: elasticsearch
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=es-docker-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - xpack.license.self_generated.type=trial
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elastic_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    # Gates `docker compose up --wait`, which is how the moon task only reports
+    # success once the cluster actually answers queries. This is the endpoint that
+    # matters to `client-retrieval`: its Elastic transport does not connect eagerly,
+    # so a node that is merely "started" would swallow every bulk write.
+    # `wait_for_status=yellow` is the right bar for a single-node cluster - replicas
+    # of the default index templates stay unassigned, so it never reaches green.
+    # curl ships in the image (/usr/bin/curl), no extra tooling needed.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    networks:
+      - elastic
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.3.0-SNAPSHOT
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - SERVER_NAME=kibana
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    # Kibana is by far the slowest of the three: it optimizes bundles and runs
+    # savedObjects migrations against Elasticsearch before serving, which is why
+    # `start_period` is 90s. Failures inside that window do not count towards
+    # `retries`, so a slow first boot does not fail the stack.
+    # `/api/status` returns 503 until Kibana is `available`, so `-f` is enough.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5601/api/status"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+    depends_on:
+      - elasticsearch
+    networks:
+      - elastic
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:9.3.0-SNAPSHOT
+    container_name: logstashc
+    environment:
+      - "LS_JAVA_OPTS=-Xmx256m -Xms256m"
+      - XPACK_MONITORING_ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    volumes:
+      - logstash_data:/usr/share/logstash/data
+    ports:
+      - "5044:5044"
+      - "5000:5000/tcp"
+      - "5000:5000/udp"
+      - "9600:9600"
+    # 9600 is the Logstash monitoring API, which only binds once the pipeline has
+    # been compiled and started - so this is a real readiness signal, not just
+    # "the JVM is up".
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9600"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    depends_on:
+      - elasticsearch
+    networks:
+      - elastic
+
+volumes:
+    elastic_data:
+    logstash_data:
+
+networks:
+  elastic:
+    driver: bridge

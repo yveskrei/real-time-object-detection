@@ -8,4 +8,7 @@ dependencies = [
     "onnx==1.18.0",
     "onnxruntime-gpu==1.22.0",
     "torch==2.7.1",
+    "ultralytics>=8.4.0",
+    "onnxslim>=0.1.94",
+    "setuptools<81",
 ]

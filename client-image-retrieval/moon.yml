@@ -1,0 +1,55 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'client-retrieval'
+layer: 'application'
+language: 'rust'
+
+project:
+  name: 'Client Image Retrieval'
+  description: 'Rust client that embeds video frames and detections with DINOv3 on Triton and bulk-writes the vectors to Elasticsearch.'
+
+# NOTE: unlike `services`, no task here sets `runFromWorkspaceRoot`. The default
+# working directory (this crate) is required: `AppConfig::load_config_file`
+# reads "secrets/config.yaml" and `ClientVideo::new` loads
+# "secrets/libclient_video.so", both relative to the process CWD.
+#
+# Startup ordering is handled entirely by the `services:*` deps. Those tasks run
+# `docker compose up --wait` and only exit once the compose healthchecks pass, so
+# by the time cargo runs both backends are up.
+#
+# The two deps guard against very different failures:
+#
+#   - Triton, like in `client-detection`, is a hard requirement:
+#     `InferenceModel::new` calls `server_ready()` and bails at startup if the
+#     server is not serving. Without the dep the client crashes.
+#
+#   - Elasticsearch being down is NOT fatal, which is exactly why it is worse.
+#     `Transport::single_node` only parses the URL, it does not connect eagerly,
+#     so `Elastic::new` succeeds against a dead node. The client then runs
+#     normally, embeds every frame, and the background flush task logs a failed
+#     bulk request every 2s while the queue is drained and discarded. The dep is
+#     here to prevent that silent data loss, not to prevent a crash.
+#
+# `device_type` in secrets/config.yaml is NOT switched by these tasks - the client is
+# what uploads the model configuration to Triton (tensorrt_plan/KIND_GPU vs
+# onnxruntime_onnx/KIND_CPU), so it must be set to match the task you run.
+tasks:
+  cpu:
+    command: 'cargo run --release'
+    deps:
+      - 'services:triton-cpu'
+      - 'services:elastic'
+    preset: 'server'
+    # The client filters with `EnvFilter::from_default_env()`, which produces a
+    # filter with no directives when RUST_LOG is unset - i.e. total silence.
+    env:
+      RUST_LOG: 'INFO'
+
+  gpu:
+    command: 'cargo run --release'
+    deps:
+      - 'services:triton-gpu'
+      - 'services:elastic'
+    preset: 'server'
+    env:
+      RUST_LOG: 'INFO'

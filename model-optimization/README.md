@@ -18,23 +18,49 @@ The following command is used for converting a model from Pytorch to Onnx:
 ```bash
 # YOLOV9
 uv run export_model.py \
-  --model_type YOLOV9 \
-  --model_path MODEL.pt \
+  --model-type YOLOV9 \
+  --model-path MODEL.pt \
   --model-source-code ./yolov9/
 
 # DINOV3
 uv run export_model.py \
-  --model_type DINOV3 \
-  --model_path MODEL.pt \
-  --model-source-code ./dinov3/
+  --model-type DINOV3 \
+  --model-path MODEL.pt \
+  --model-source-code ./dinov3/ \
   --dino-type dinov3_vitb16
+
+# YOLO26X - loaded from the installed `ultralytics` package,
+# so no --model-source-code is needed
+uv run export_model.py \
+  --model-type YOLO26X \
+  --model-path models/yolo26x.pt
 ```
+
+Optional flags:
+- `--max-det` (default `300`) - detections per image, baked into the graph (YOLO26X)
+- `--simplify` - run `onnxslim` over the exported graph (see below)
+- `--output-path` (defaults to `cwd`) - The path to save the exported model
+
+### Output shape annotation
+Every export runs the model once before tracing and writes the resulting shape into the ONNX graph's
+output signature, so it advertises e.g. `[batch_size, 84, 8400]` rather than
+`[batch_size, Concatoutput_dim_1, Concatoutput_dim_2]`.
+
+This matters for Triton. ONNX shape inference cannot always derive the output dims on its own - a
+`view()`/`reshape()` against the symbolic batch axis (which YOLOv9's head does) leaves the trailing
+dimensions as symbolic placeholders. Triton reads those as `[-1, -1, -1]`, compares them to the
+`dims` in your `config.pbtxt`, and refuses to load the model. The numbers were always correct; only
+the declared signature was under-specified.
+
+Only the batch axis is dynamic (see `dynamic_axes` in `export_model.py`), so every other dimension is
+static by construction and safe to pin. Deriving it from a real forward pass rather than hardcoding
+means it stays correct across class counts, input sizes and `--max-det` values.
 
 ## Onnx to TensorRT Conversion
 The following command is used for converting a model (with support of batch inference).<br>
 We would be doing the TensorRT conversion from within the docker image of Triton Server, to ensure its compatibility with the compiled model:
 ```bash
-# YOLOV9
+# YOLOV9/YOLO26
 /usr/src/tensorrt/bin/trtexec \
     --onnx=MODEL.onnx \
     --saveEngine=CONVERTED.engine \
@@ -69,56 +95,4 @@ We would be doing the TensorRT conversion from within the docker image of Triton
     --fp16 \
     --inputIOFormats=fp16:chw \
     --outputIOFormats=fp16:chw
-```
-
-## Extras - Get model best latency/throughput
-Using a third party tool, `perf_analyzer`, we iterate over different batch sizes for one model instance. We find the sweet spot of when the model is giving the best latency for the max amount of batch size.
-```bash
-for b in 1 2 4 8 16 32; do
-  perf_analyzer \
-    -m <model_name> \
-    -b $b \
-    --concurrency-range 1:1 \
-    --collect-metrics \
-    --verbose-csv \
-    -f results_batch_${b}.csv
-done
-```
-
-To test performance of TRT model, use the following command:
-```bash
-/usr/src/tensorrt/bin/trtexec \
-  --loadEngine=CONVERTED.engine \
-  --shapes=images:8x3x640x640 \
-  --exportTimes=inference_times.json
-
-Dinov3 export:
-```bash
-# For TritonServer from 24.12+
-/usr/src/tensorrt/bin/trtexec \
-    --onnx=/yves/dinov3_vitb16-fp32-512.onnx \
-    --saveEngine=/yves/dinov3_512.engine \
-    --optShapes=images:8x3x512x512 \
-    --minShapes=images:1x3x512x512 \
-    --maxShapes=images:16x3x512x512 \
-    --inputIOFormats=fp16:chw \
-    --outputIOFormats=fp16:chw \
-    --fp16 \
-    --precisionConstraints=obey \
-    --layerPrecisions='.*Softmax.*':fp32,'.*LayerNorm.*':fp32,'.*rope_embed.*':fp32 
-
-# For TritonServer up to 24.12
-/usr/src/tensorrt/bin/trtexec     
-    --onnx=/yves/dinov3_vitb16-fp32-512.onnx     
-    --saveEngine=/yves/dinov3_512_perfect.engine     
-    --optShapes=images:8x3x512x512     
-    --minShapes=images:1x3x512x512     
-    --maxShapes=images:16x3x512x512     
-    --inputIOFormats=fp16:chw     
-    --outputIOFormats=fp16:chw     
-    --fp16     
-    --noTF32     
-    --precisionConstraints=obey     
-    --tacticSources=+cuBLAS,+cuBLAS_LT,+cuDNN     
-    --layerPrecisions='.*Softmax.*':fp32,'.*LayerNorm.*':fp32,'.*rope_embed.*':fp32,'.*attn.*':fp16,'.*mlp.*':fp16,'.*patch_embed.*':fp16,'*':fp32
 ```
