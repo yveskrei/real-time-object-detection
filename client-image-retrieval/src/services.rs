@@ -65,7 +65,7 @@ impl Services {
             .context("Error initiating Elastic")?;
 
         // Initiate statistics
-        let statistics = Statistics::new(app_config.inference_config().device_type)
+        let statistics = Statistics::new(app_config.device_type())
             .context("Error intiating statistics")?;
 
         // Initiate client video

@@ -18,9 +18,12 @@ project:
 # Triton as serving, so by the time cargo runs the server is up. `InferenceModel::new`
 # calls `server_ready()` and bails if it is not, which is what this ordering prevents.
 #
-# `device_type` in secrets/config.yaml is NOT switched by these tasks - the client is
-# what uploads the model configuration to Triton (tensorrt_plan/KIND_GPU vs
-# onnxruntime_onnx/KIND_CPU), so it must be set to match the task you run.
+# `DEVICE_TYPE` is what these tasks actually switch. The client is what uploads the
+# model configuration to Triton (tensorrt_plan/model.plan/KIND_GPU vs
+# onnxruntime_onnx/model.onnx/KIND_CPU), and the same variable also selects each
+# model's default precision - FP32 on CPU, FP16 on GPU - which a model can override by
+# declaring `precision` in secrets/config.yaml. It is required and has no default, so a
+# bare `cargo run` must export it.
 tasks:
   cpu:
     command: 'cargo run --release'
@@ -31,6 +34,7 @@ tasks:
     # filter with no directives when RUST_LOG is unset - i.e. total silence.
     env:
       RUST_LOG: 'INFO'
+      DEVICE_TYPE: 'CPU'
 
   gpu:
     command: 'cargo run --release'
@@ -39,3 +43,4 @@ tasks:
     preset: 'server'
     env:
       RUST_LOG: 'INFO'
+      DEVICE_TYPE: 'GPU'

@@ -65,8 +65,8 @@ tasks:
   # --- Redis -------------------------------------------------------------
   # Same detached-and-`--wait` shape as the Triton and Elastic tasks above, and
   # for the same reason: a `persistent` task is never waited on, so only a
-  # completing task can actually gate `search:cpu` / `:gpu` behind a Redis that
-  # answers commands. `search` stores the uploaded image's embedding in Redis
+  # completing task can actually gate `retrieval-search:cpu` / `:gpu` behind a Redis
+  # that answers commands. `retrieval-search` stores the uploaded image's embedding in Redis
   # between upload and search, so starting it against a cold Redis is a hard
   # failure, not a degraded mode.
   #

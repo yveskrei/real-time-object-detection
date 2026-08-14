@@ -1,6 +1,6 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
-id: 'search'
+id: 'retrieval-search'
 layer: 'application'
 language: 'rust'
 
@@ -41,8 +41,12 @@ project:
 #     With no Redis there is nowhere to park the embedding between the two
 #     calls, so search breaks outright rather than degrading.
 #
-# `device_type` in secrets/config.yaml is NOT switched by these tasks - it must be
-# set to match the task you run (CPU vs GPU), same as in the other clients.
+# `DEVICE_TYPE` is what these tasks actually switch. The client is what uploads the
+# model configuration to Triton (tensorrt_plan/model.plan/KIND_GPU vs
+# onnxruntime_onnx/model.onnx/KIND_CPU), and the same variable also selects each
+# model's default precision - FP32 on CPU, FP16 on GPU - which a model can override by
+# declaring `precision` in secrets/config.yaml. It is required and has no default, so a
+# bare `cargo run` must export it.
 tasks:
   cpu:
     command: 'cargo run --release'
@@ -55,6 +59,7 @@ tasks:
     # filter with no directives when RUST_LOG is unset - i.e. total silence.
     env:
       RUST_LOG: 'INFO'
+      DEVICE_TYPE: 'CPU'
 
   gpu:
     command: 'cargo run --release'
@@ -65,3 +70,4 @@ tasks:
     preset: 'server'
     env:
       RUST_LOG: 'INFO'
+      DEVICE_TYPE: 'GPU'

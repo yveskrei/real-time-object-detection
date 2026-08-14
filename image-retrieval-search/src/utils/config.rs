@@ -37,7 +37,13 @@ impl FromStr for SearchType {
 pub struct ModelConfig {
     pub name: String,
     pub model_type: ModelType,
-    pub precision: InferencePrecision,
+    /// Omit to take the device default - FP32 on CPU, FP16 on GPU. An explicit value
+    /// always wins, and must match the precision the artifact was actually built at:
+    /// this drives the client's own pre/post-processing widths, so a mismatch produces
+    /// wrong numbers rather than an error. Resolved by [`AppConfig::new`], so
+    /// [`ModelConfig::precision`] is always populated by the time anything reads it.
+    #[serde(default)]
+    precision: Option<InferencePrecision>,
     pub input_name: String,
     pub input_shape: Vec<i64>,
     pub output_name: String,
@@ -45,6 +51,14 @@ pub struct ModelConfig {
     pub batch_max_size: u32,
     pub batch_max_queue_delay: u32,
     pub batch_preferred_sizes: Vec<u32>,
+}
+
+impl ModelConfig {
+    /// The precision this model runs at, resolved against the device
+    pub fn precision(&self) -> InferencePrecision {
+        self.precision
+            .expect("precision is resolved for every model in AppConfig::new")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -60,7 +74,6 @@ pub struct ElasticConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct InferenceConfig {
-    pub device_type: DeviceType,
     pub models: HashMap<ModelPurpose, ModelConfig>,
     pub instances: InstancesConfig,
 }
@@ -152,16 +165,33 @@ impl FromStr for ModelPurpose {
     }
 }
 
+/// Name of the environment variable naming the inference device
+pub const DEVICE_TYPE_ENV: &str = "DEVICE_TYPE";
+
 /// Represents the type of device we perform inference on
 ///
-/// Selects the Triton platform, the model file the server expects, and the
-/// instance kind:
-/// - `GPU` -> `tensorrt_plan`, `model.plan`, `KIND_GPU`
-/// - `CPU` -> `onnxruntime_onnx`, `model.onnx`, `KIND_CPU`
+/// Read from the `DEVICE_TYPE` environment variable rather than the configuration
+/// file, so one variable switches the whole deployment and the moon `:cpu` / `:gpu`
+/// tasks can set it. Selects the Triton platform, the model file the server expects,
+/// the instance kind, and the default precision:
+/// - `GPU` -> `tensorrt_plan`, `model.plan`, `KIND_GPU`, FP16
+/// - `CPU` -> `onnxruntime_onnx`, `model.onnx`, `KIND_CPU`, FP32
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Deserialize)]
 pub enum DeviceType {
     GPU,
     CPU,
+}
+
+impl FromStr for DeviceType {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_uppercase().as_str() {
+            "GPU" => Ok(DeviceType::GPU),
+            "CPU" => Ok(DeviceType::CPU),
+            other => anyhow::bail!("Invalid device type '{}', expected CPU or GPU", other),
+        }
+    }
 }
 
 impl DeviceType {
@@ -171,6 +201,38 @@ impl DeviceType {
             DeviceType::CPU => "CPU",
         }
         .to_string()
+    }
+
+    /// Reads the inference device from the environment
+    ///
+    /// Deliberately has no default. The device decides the Triton platform, the model
+    /// file, the instance kind and the default precision, so guessing it wrong yields a
+    /// model that loads and returns nonsense rather than one that fails loudly.
+    pub fn from_env() -> Result<Self> {
+        let raw = std::env::var(DEVICE_TYPE_ENV).map_err(|_| {
+            anyhow::anyhow!(
+                "{} is not set. Set it to CPU or GPU - for example \
+                 `{}=CPU cargo run --release`. The moon tasks set it for you: \
+                 `moon run <project>:cpu` or `moon run <project>:gpu`.",
+                DEVICE_TYPE_ENV,
+                DEVICE_TYPE_ENV
+            )
+        })?;
+
+        raw.parse()
+            .with_context(|| format!("Error reading {}", DEVICE_TYPE_ENV))
+    }
+
+    /// Precision assumed for a model that does not declare one
+    ///
+    /// CPU runs through ONNX Runtime, whose exports here are FP32; GPU runs prebuilt
+    /// TensorRT engines, which are FP16. A model whose artifact differs declares
+    /// `precision` explicitly.
+    pub fn default_precision(&self) -> InferencePrecision {
+        match self {
+            DeviceType::GPU => InferencePrecision::FP16,
+            DeviceType::CPU => InferencePrecision::FP32,
+        }
     }
 
     pub fn hardware_name(&self) -> Result<String> {
@@ -219,6 +281,11 @@ pub struct AppConfig {
     inference_config: InferenceConfig,
     search_config: HashMap<SearchType, SearchConfigOption>,
 
+    /// Read from `DEVICE_TYPE` at startup, not from the configuration file.
+    /// `Option` only so `serde(skip)` has a `Default`; [`AppConfig::new`] always fills it.
+    #[serde(skip)]
+    device_type: Option<DeviceType>,
+
     /// Resolved at startup, not read from the configuration file
     #[serde(skip)]
     hardware_name: String,
@@ -233,12 +300,22 @@ impl AppConfig {
         // Initiate app logging
         AppConfig::init_logging(config.local);
 
-        // Resolve the hardware we perform inference on. Bails if a GPU device type
-        // is configured but the GPU name cannot be read.
-        let device_type = config.inference_config().device_type;
+        // Resolve the device from the environment before anything that depends on it.
+        let device_type = DeviceType::from_env()?;
+        config.device_type = Some(device_type);
+
+        // Resolve the hardware we perform inference on. Bails if the device is GPU
+        // but the GPU name cannot be read.
         config.hardware_name = device_type
             .hardware_name()
             .context("Error resolving inference hardware name")?;
+
+        // Give every model that did not declare a precision the device default, so the
+        // rest of the application only ever sees a resolved value.
+        let default_precision = device_type.default_precision();
+        for model_config in config.inference_config.models.values_mut() {
+            model_config.precision.get_or_insert(default_precision);
+        }
 
         Ok(config)
     }
@@ -319,6 +396,12 @@ impl AppConfig {
 
     pub fn search_config(&self) -> &HashMap<SearchType, SearchConfigOption> {
         &self.search_config
+    }
+
+    /// The device we perform inference on, from `DEVICE_TYPE`
+    pub fn device_type(&self) -> DeviceType {
+        self.device_type
+            .expect("device type is resolved in AppConfig::new")
     }
 
     pub fn hardware_name(&self) -> &str {

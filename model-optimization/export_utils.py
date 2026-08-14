@@ -5,7 +5,7 @@ from enum import Enum
 class ModelType(Enum):
     YOLOV9 = "YOLOV9"
     DINOV3 = "DINOV3"
-    YOLO26X = "YOLO26X"
+    YOLO26 = "YOLO26"
 
 def get_yolov9_model(model_source_path: str, model_path: str) -> torch.nn.Module:
     class YOLOV9Wrapper(torch.nn.Module):
@@ -67,9 +67,9 @@ def get_dinov3_model(model_source_code: str, model_path: str, dino_type: str) ->
 
     return model
 
-def get_yolo26x_model(model_path: str, max_det: int = 300) -> torch.nn.Module:
-    class YOLO26XWrapper(torch.nn.Module):
-        """ Wrapper for YOLO26x model to adjust output format. End2end / NMS-free
+def get_yolo26_model(model_path: str, max_det: int = 300) -> torch.nn.Module:
+    class YOLO26Wrapper(torch.nn.Module):
+        """ Wrapper for YOLO26 model to adjust output format. End2end / NMS-free
 
         Output is (batch, max_det, 6), each row being
         [x1, y1, x2, y2, score, class_id] - xyxy in pixels of the letterboxed
@@ -104,6 +104,6 @@ def get_yolo26x_model(model_path: str, max_det: int = 300) -> torch.nn.Module:
     head.max_det = max_det
     head.shape = None     # drop the stale cached shape so anchors regenerate
 
-    model = YOLO26XWrapper(model_base, max_det).eval()
+    model = YOLO26Wrapper(model_base, max_det).eval()
 
     return model

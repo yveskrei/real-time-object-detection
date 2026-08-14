@@ -105,7 +105,7 @@ impl InferenceModel {
             parameters: HashMap::new(),
             inputs: vec![InferInputTensor {
                 name: model_config.input_name.to_string(),
-                datatype: model_config.precision.to_string(),
+                datatype: model_config.precision().to_string(),
                 shape: batch_input_shape,
                 parameters: HashMap::new(),
                 contents: None,
@@ -131,7 +131,7 @@ impl InferenceModel {
     /// hardware we run on and by the model purpose - so a deployment can tune the count
     /// per GPU model, or for CPU, and separately per task.
     pub async fn start(&self, app_config: &AppConfig, model_purpose: ModelPurpose) -> Result<()> {
-        let device_type = app_config.inference_config().device_type;
+        let device_type = app_config.device_type();
         let hardware_name = app_config.hardware_name();
         let instances = app_config
             .inference_config()
@@ -156,6 +156,7 @@ impl InferenceModel {
             model_purpose = model_purpose.to_string(),
             device_type = device_type.to_string(),
             hardware_name = hardware_name,
+            precision = self.model_config().precision().to_string(),
             instances = instances,
             "Initiated model instances"
         );
@@ -197,7 +198,7 @@ impl InferenceModel {
         instances: u32,
         device_type: DeviceType,
     ) -> serde_json::Value {
-        let data_type = format!("TYPE_{}", model_config.precision.to_string());
+        let data_type = format!("TYPE_{}", model_config.precision().to_string());
 
         let (platform, model_filename, instance_group) = match device_type {
             DeviceType::GPU => (
@@ -310,7 +311,7 @@ impl InferenceModel {
             .iter()
             .map(|&dim| dim as usize)
             .product::<usize>()
-            * match self.model_config.precision {
+            * match self.model_config.precision() {
                 InferencePrecision::FP16 => 2,
                 InferencePrecision::FP32 => 4,
             };

@@ -16,7 +16,7 @@ services:
       --maxmemory 512mb
       --maxmemory-policy volatile-lru
     # Gates `--wait` in the `services:redis` task, so dependents only start once
-    # Redis actually answers commands. `search` treats Redis as mandatory - it
+    # Redis actually answers commands. `retrieval-search` treats Redis as mandatory - it
     # parks the uploaded image's embedding there between upload and search - so
     # "container started" is not a useful signal on its own.
     # redis-cli ships in the image (/usr/local/bin/redis-cli), no extra tooling

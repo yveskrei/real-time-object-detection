@@ -9,9 +9,9 @@ runs a kNN query against the vectors the ingest client wrote.
 There is no video, no FFI and no queue here. The unit of work is an HTTP request.
 
 All paths in this document are relative to the repository root unless stated otherwise.
-The crate lives in the inner `client/` directory — `image-retrieval-search/client` — and
-the Cargo package name is `client` (`image-retrieval-search/client/Cargo.toml:2`), so the
-binary produced is `image-retrieval-search/client/target/{debug,release}/client`. Rust
+The crate root is `image-retrieval-search`, and the Cargo package name is `client`
+(`image-retrieval-search/Cargo.toml:2`), so the binary produced is
+`image-retrieval-search/target/{debug,release}/client`. Rust
 **edition 2024**. Source paths below are given relative to the crate root.
 
 ---
@@ -83,7 +83,9 @@ main()                                        src/main.rs:12
  └─ AppConfig::new()                          src/utils/config.rs:229
       ├─ load_config_file()  reads ./secrets/config.yaml       :247
       ├─ init_logging(local)                                   :263
-      └─ device_type.hardware_name()  (NVML when GPU)          :176
+      ├─ DeviceType::from_env()  reads DEVICE_TYPE, required
+      ├─ device_type.hardware_name()  (NVML when GPU)          :176
+      └─ fill each model's absent precision from the device default
  └─ services::init_services(&cfg)                             src/services.rs:28
       ├─ Services::new(...)                                    :52
       │    ├─ Elastic::new     → transport + client, keeps elastic_config
@@ -217,12 +219,13 @@ between.
   │
   │        ── caller holds the uuid, ≤ 120 s ──
   ▼
-  GET /search?image_id=<uuid>&search_type=MEDIUM[&channel_ids=…]
+  GET /search?image_id=<uuid>&search_type=MEDIUM[&channel_ids=1,2,3]
                               [&timestamp_start=…][&timestamp_end=…]
   ▼
- search_image                                          retrieval/get.rs:45
-  │  bind Query<ImageSearchRequest>                                 :46
-  │  build SearchMetadata from the three optional filters           :49-53
+ search_image                                          retrieval/get.rs:66
+  │  bind Query<ImageSearchRequest>                                 :67
+  │  parse_channel_ids  "1,2,3" → Vec<u32>, 400 if malformed        :30, :74
+  │  build SearchMetadata from the three optional filters           :84-88
   ▼
  processing::search::search_image                      processing/search.rs:61
   │  GET retrieval_<uuid>                                           :69-74
@@ -380,9 +383,15 @@ The tier lookup happens first (`elastic.rs:51-52`): an unknown `search_type` is 
 error, so every one of `LIGHT`, `MEDIUM`, `HEAVY` must be present in
 `search_config`. Everything after that is assembly.
 
-**The filter is optional and additive.** `must_clauses` starts empty (`elastic.rs:54`).
+**The filter is optional and additive.** `must_clauses` starts empty (`elastic.rs:58`).
 A `terms` clause on `channel_id` is pushed only when `channel_ids` is `Some` *and*
-non-empty (`elastic.rs:57-65`). A `range` clause on `timestamp` is pushed when at least
+non-empty (`elastic.rs:61-67`). Those ids arrive as a single comma-separated query
+parameter — `?channel_ids=1,2,3` — which `parse_channel_ids` (`get.rs:30`) splits and
+parses into `Vec<u32>`, skipping empty segments and rejecting anything non-numeric with a
+400. A single string rather than a repeated parameter because `axum::extract::Query`
+deserializes with `serde_urlencoded`, which has no sequence support. `u32` matches the
+`source_id` the ingest side writes into `channel_id`; the field is mapped `keyword`, and
+Elasticsearch coerces numeric terms to their string form. A `range` clause on `timestamp` is pushed when at least
 one of the two bounds is present, with `gte` and `lte` filled in independently
 (`elastic.rs:68-84`) — so a one-sided range is expressible. Only if at least one clause
 was built does a `bool.must` wrapper get created (`elastic.rs:86-94`) and attached to the
@@ -572,7 +581,6 @@ task. Both `set_ex` and `get` (`search.rs:42`, `:71`) go through such a clone.
 
 | Key | Type | Effect |
 | --- | --- | --- |
-| `device_type` | `GPU` \| `CPU` | Applies to **both** models: platform, model filename, instance kind, the `optimization` block, and whether NVML runs. |
 | `instances.default` | `u32` | Instance count when the hardware, or the purpose under that hardware, is not listed. |
 | `instances.custom` | `map<String, map<ModelPurpose, u32>>` | Keyed first by `hardware_name` — the literal `"CPU"`, or the NVML device name — then by `ModelPurpose`. Resolved by `InstancesConfig::resolve` (`config.rs:79`), falling back to `default` when either level is absent. This two-level map is shared verbatim with the two client crates. |
 | `models` | `map<ModelPurpose, ModelConfig>` | Two purposes here, both embedders. |
@@ -583,7 +591,7 @@ task. Both `set_ex` and `get` (`search.rs:42`, `:71`) go through such a clone.
 | --- | --- |
 | `name` | Triton model name; must match the directory in `triton_models/`. |
 | `model_type` | `DINOV3` is the only variant (`config.rs:107`). |
-| `precision` | `FP32` or `FP16`. Becomes `TYPE_FP32`/`TYPE_FP16` in the generated Triton config, the request datatype, the preprocessing output format, and the postprocessing element width. |
+| `precision` | Optional. `FP32` or `FP16`; omit to take the device default — FP32 under `DEVICE_TYPE=CPU`, FP16 under `GPU`. Becomes `TYPE_FP32`/`TYPE_FP16` in the generated Triton config, the request datatype, the preprocessing output format, and the postprocessing element width — so an explicit value must match the precision the artifact was built at. |
 | `input_name` / `output_name` | Tensor names as compiled into the model. |
 | `input_shape` | Without the batch dimension. The **last** element is the letterbox target size (`dino.rs:96-99`). |
 | `output_shape` | Product × precision size gives the per-sample output byte count (`inference.rs:317-323`). |
@@ -595,13 +603,14 @@ task. Both `set_ex` and `get` (`search.rs:42`, `:71`) go through such a clone.
 
 `local: true`, `port: 8080`. Elastic at `http://localhost:9200`, index `embeddings-live`.
 Triton at `http://localhost:8001` — the **gRPC** port (8000 is HTTP, 8002 metrics). Redis
-at `localhost:6379`. `device_type: CPU`, one instance of each model.
+at `localhost:6379`. One instance of each model. The device comes from `DEVICE_TYPE`,
+not from this file.
 
 | | `FrameEmbedding` | `BBOXEmbedding` |
 | --- | --- | --- |
 | `name` | `dinov3-512` | `dinov3-224` |
 | `model_type` | `DINOV3` | `DINOV3` |
-| `precision` | FP16 | FP16 |
+| `precision` | *(device default)* | *(device default)* |
 | `input_name` / `output_name` | `images` / `output` | `images` / `output` |
 | `input_shape` | `[3, 512, 512]` | `[3, 224, 224]` |
 | `output_shape` | `[768]` | `[768]` |
@@ -621,7 +630,7 @@ to whatever Triton coalesces across concurrent requests.
 
 ### Prerequisites
 
-1. **The two models in the Triton model repository.** With `device_type: CPU` the client
+1. **The two models in the Triton model repository.** Under `DEVICE_TYPE=CPU` the client
    uploads a config declaring `onnxruntime_onnx` and
    `default_model_filename: model.onnx`, so it needs
    `triton_models/{dinov3-512,dinov3-224}/1/model.onnx`. On GPU it needs `model.plan` in
@@ -636,19 +645,19 @@ to whatever Triton coalesces across concurrent requests.
    Kibana comes up with the Elastic stack on port 5601.
 3. **Vectors in the index.** Searches return what `client-image-retrieval` wrote, so that
    crate needs to have run against the same cluster for a search to find anything.
-4. **Working directory is the crate root**, `image-retrieval-search/client`. Both
+4. **Working directory is the crate root**, `image-retrieval-search`. Both
    `secrets/config.yaml` (`config.rs:249`) and `logs/app.log` (`config.rs:264`) resolve
-   relative to the process CWD; the moon project maps `search` to that inner directory
-   for exactly this reason.
-5. **`device_type` matches the Triton profile you boot.** The client is what tells Triton
-   which platform to load, so booting the CPU compose profile with `device_type: GPU`
-   asks an unaccelerated Triton for a `tensorrt_plan`. There is no environment-variable
-   override; `secrets/config.yaml` is the only place to switch it.
+   relative to the process CWD, which is why no task here sets `runFromWorkspaceRoot`.
+5. **`DEVICE_TYPE` is set, and matches the Triton profile you boot.** The client is what
+   tells Triton which platform to load, so pointing `DEVICE_TYPE=GPU` at the CPU profile
+   asks an unaccelerated Triton for a `tensorrt_plan`. The moon tasks set both together,
+   so this only needs thought when running by hand. The variable has no default: unset,
+   the process exits at config load naming it.
 
 ### Build
 
 ```bash
-cd image-retrieval-search/client
+cd image-retrieval-search
 cargo build --release
 ```
 
@@ -662,12 +671,12 @@ Beyond the shared dependency set, `Cargo.toml` adds the HTTP and storage stack: 
 ### Run
 
 ```bash
-moon run search:cpu     # or
-moon run search:gpu
+moon run retrieval-search:cpu     # or
+moon run retrieval-search:gpu
 ```
 
 Each task depends on the matching `services:triton-*` task plus `services:elastic` and
-`services:redis` (`moon.yml:49-52`, `:62-64`), so the whole backing stack is started for
+`services:redis` (`moon.yml:53-56`, `:66-69`), so the whole backing stack is started for
 you. All three service tasks run `docker compose up --detach --wait`, which blocks on the
 compose healthchecks and exits only once the services report ready — Triton serving, the
 Elasticsearch cluster at `wait_for_status=yellow`, and Redis answering an authenticated
@@ -677,9 +686,9 @@ guaranteed to succeed, and the cluster is answering queries.
 The gating depends on those service tasks being **non-persistent**: moon starts
 `persistent` tasks concurrently and never waits for one to finish, so a persistent task
 would not gate anything. Confirm the shape with
-`moon action-graph search:cpu --dot` — it must show `RunTask(services:triton-cpu)`,
+`moon action-graph retrieval-search:cpu --dot` — it must show `RunTask(services:triton-cpu)`,
 `RunTask(services:elastic)` and `RunTask(services:redis)` feeding
-`RunPersistentTask(search:cpu)`.
+`RunPersistentTask(retrieval-search:cpu)`.
 
 Because all three stacks run detached, nothing streams their output and they outlive the
 client:
@@ -693,8 +702,15 @@ moon run services:elastic-down
 moon run services:redis-down
 ```
 
-Both client tasks set `RUST_LOG=INFO`; a `RUST_LOG` exported in your shell takes
-precedence.
+### Environment
+
+| Variable | Required | Effect |
+| --- | --- | --- |
+| `DEVICE_TYPE` | **yes** | `CPU` or `GPU`, case-insensitive. Selects the Triton platform, model filename, instance kind, the `optimization` block, whether NVML runs, and each model's default precision. No default — unset, the process exits at config load naming the variable. Both moon tasks set it to match the Triton they boot. |
+| `RUST_LOG` | in practice | Nothing is logged when unset. Both moon tasks set `INFO`; a value exported in your shell takes precedence. |
+
+At startup the client logs one line per model reporting the resolved device, hardware
+name, precision, and whether that precision came from the config or the device default.
 
 `image-retrieval-search/run_local.sh` predates both the moon tasks and the compose-file
 split — it drives `../docker-compose.yml` with a `client-search` profile, which has since

@@ -6,7 +6,7 @@ import os
 import onnx
 
 # Custom modules
-from export_utils import ModelType, get_dinov3_model, get_yolov9_model, get_yolo26x_model
+from export_utils import ModelType, get_dinov3_model, get_yolov9_model, get_yolo26_model
 
 def export_model(
     model_name: str,
@@ -131,7 +131,7 @@ def main():
         '--model-source-code',
         type=str,
         help='Path to the model source code directory (YOLOV9, DINOV3). '
-             'Not needed for models loaded from an installed package (e.g. YOLO26X)'
+             'Not needed for models loaded from an installed package (e.g. YOLO26)'
     )
     parser.add_argument(
         '--dino-type',
@@ -166,7 +166,7 @@ def main():
         '--max-det',
         type=int,
         default=300,
-        help='Maximum detections per image, baked into the graph (YOLO26X)'
+        help='Maximum detections per image, baked into the graph (YOLO26)'
     )
     parser.add_argument(
         '--simplify',
@@ -199,8 +199,8 @@ def main():
             args.model_source_code,
             args.model_path
         )
-    elif model_type == ModelType.YOLO26X:
-        model = get_yolo26x_model(
+    elif model_type == ModelType.YOLO26:
+        model = get_yolo26_model(
             args.model_path,
             args.max_det
         )

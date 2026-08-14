@@ -441,7 +441,7 @@ pub async fn process_frame(
     // Pre process
     let measure_start = Instant::now();
     let frame_clone = Arc::clone(&frame);
-    let precision = inference_model.model_config().precision;
+    let precision = inference_model.model_config().precision();
     let pre_frame =
         tokio::task::spawn_blocking(move || preprocess_frame(&frame_clone, precision, target_size))
             .await

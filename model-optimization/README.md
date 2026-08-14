@@ -6,7 +6,7 @@ The conversion will result with model_**fp16** and model_**fp32** files, which r
 **FP16** Models are essentially equal in accuracy(for inference) and are much lighter and faster to run, and it is recommanded to use. 
 
 Next, we would be converting the `.onnx` file we have to `.engine`, using NVIDIA's TensorRT tool.<br>
-TensorRT compiles a model for your specific achitecture(one used at time of compilation), therefore making it very efficient when running on your machine.<br>
+TensorRT compiles a model for your specific achitecture(one used at time of compilation), therefore making it very efficient when running on your machine.
 
 ## Setting up the environment
 ```bash
@@ -29,15 +29,15 @@ uv run export_model.py \
   --model-source-code ./dinov3/ \
   --dino-type dinov3_vitb16
 
-# YOLO26X - loaded from the installed `ultralytics` package,
+# YOLO26 - loaded from the installed `ultralytics` package,
 # so no --model-source-code is needed
 uv run export_model.py \
-  --model-type YOLO26X \
-  --model-path models/yolo26x.pt
+  --model-type YOLO26 \
+  --model-path MODEL.pt
 ```
 
 Optional flags:
-- `--max-det` (default `300`) - detections per image, baked into the graph (YOLO26X)
+- `--max-det` (default `300`) - detections per image, baked into the graph (YOLO26)
 - `--simplify` - run `onnxslim` over the exported graph (see below)
 - `--output-path` (defaults to `cwd`) - The path to save the exported model
 
@@ -49,7 +49,7 @@ output signature, so it advertises e.g. `[batch_size, 84, 8400]` rather than
 This matters for Triton. ONNX shape inference cannot always derive the output dims on its own - a
 `view()`/`reshape()` against the symbolic batch axis (which YOLOv9's head does) leaves the trailing
 dimensions as symbolic placeholders. Triton reads those as `[-1, -1, -1]`, compares them to the
-`dims` in your `config.pbtxt`, and refuses to load the model. The numbers were always correct; only
+`dims` in your Triton config, and refuses to load the model. The numbers were always correct; only
 the declared signature was under-specified.
 
 Only the batch axis is dynamic (see `dynamic_axes` in `export_model.py`), so every other dimension is

@@ -97,7 +97,9 @@ main()                                        src/main.rs:8
       ├─ load_config_file()  reads ./secrets/config.yaml      :250
       ├─ init_logging(local)                                  :266
       ├─ per-source override + clamping                        :213-237
-      └─ device_type.hardware_name()  (NVML when GPU)          :169
+      ├─ DeviceType::from_env()  reads DEVICE_TYPE, required
+      ├─ device_type.hardware_name()  (NVML when GPU)          :169
+      └─ fill each model's absent precision from the device default
  └─ services::init_services(&cfg, Handle::current())          src/services.rs:25
       ├─ Services::new(...)                                    :53
       │    ├─ InferenceModels::new   → one InferenceModel per configured ModelPurpose,
@@ -265,9 +267,9 @@ load-bearing. `DeviceType` still selects `tensorrt_plan`/`model.plan`/`KIND_GPU`
 
 What this crate changes is the arity. There are now three `InferenceModel`s, one per
 `ModelPurpose`, each with its own client, its own generated Triton config and its own
-precision. Notably `device_type` is a single global setting
-(`inference_config.device_type`) applied to all three: all models load on the same
-platform.
+precision. Notably the device is a single global setting — the `DEVICE_TYPE`
+environment variable — applied to all three: all models load on the same platform, and
+all take their default precision from it.
 
 ### Which `infer()` path each model takes
 
@@ -578,7 +580,6 @@ whole, and every surviving box is cropped and embedded.
 
 | Key | Type | Effect |
 | --- | --- | --- |
-| `device_type` | `GPU` \| `CPU` | Applies to **all three** models: platform, model filename, instance kind, the `optimization` block, and whether NVML runs. |
 | `instances.default` | `u32` | Instance count when the hardware, or the purpose under that hardware, is not listed. |
 | `instances.custom` | `map<String, map<ModelPurpose, u32>>` | Keyed first by `hardware_name` — the literal `"CPU"`, or the NVML device name — then by `ModelPurpose`, so the detector and the two embedders can each get their own count on the same hardware. Resolved by `InstancesConfig::resolve` (`:84`), which falls back to `default` when either level is absent. |
 | `models` | `map<ModelPurpose, ModelConfig>` | Three purposes now, see below. |
@@ -602,7 +603,7 @@ selects only the output decoder *within* the YOLO path (`yolo.rs:490-500`).
 | --- | --- |
 | `name` | Triton model name; must match the directory in `triton_models/`. |
 | `model_type` | `YOLOV9`, `YOLO26` or `DINOV3`. |
-| `precision` | `FP32` or `FP16`. Becomes `TYPE_FP32`/`TYPE_FP16` in the generated Triton config, the request datatype, the preprocessing output format, and the postprocessing element width. |
+| `precision` | Optional. `FP32` or `FP16`; omit to take the device default — FP32 under `DEVICE_TYPE=CPU`, FP16 under `GPU`. Becomes `TYPE_FP32`/`TYPE_FP16` in the generated Triton config, the request datatype, the preprocessing output format, and the postprocessing element width — so an explicit value must match the precision the artifact was built at. |
 | `input_name` / `output_name` | Tensor names as compiled into the model. |
 | `input_shape` | Without the batch dimension. The **last** element is the letterbox target size (`yolo.rs:434-438`, `dino.rs:177-182`, `:234-239`). |
 | `output_shape` | Product × precision size gives the per-sample output byte count (`inference.rs:305-314`). Must be 2-dimensional for the YOLO decoders; the DINO path reads it only through that product. |
@@ -615,12 +616,13 @@ selects only the output decoder *within* the YOLO path (`yolo.rs:490-500`).
 `local: true`, one source (id 1), `inf_frame: 25`, `conf_threshold: 0.25`,
 `nms_iou_threshold: 0.5` (unused under YOLO26), no `custom` block. Elastic at
 `http://localhost:9200`, index `embeddings-live`. Triton at `http://localhost:8001`,
-`device_type: CPU`, one instance.
+one instance of each model. The device comes
+from `DEVICE_TYPE`, not from this file.
 
 | | `FrameDetection` | `FrameEmbedding` | `BBOXEmbedding` |
 | --- | --- | --- | --- |
 | `name` | `yolo26x` | `dinov3-512` | `dinov3-224` |
-| `precision` | FP32 | FP16 | FP16 |
+| `precision` | *(device default)* | *(device default)* | *(device default)* |
 | `input_name` | `images` | `images` | `images` |
 | `input_shape` | `[3, 640, 640]` | `[3, 512, 512]` | `[3, 224, 224]` |
 | `output_name` | `output` | `output` | `output` |
@@ -651,7 +653,7 @@ frame can present many inputs at once.
    (`services.rs:72`). A built copy exists in the sibling project at
    `client-real-time/client/secrets/libclient_video.so`; copying it in is a deliberate
    manual step.
-2. **The three models in the Triton model repository.** With `device_type: CPU` the
+2. **The three models in the Triton model repository.** Under `DEVICE_TYPE=CPU` the
    client uploads a config declaring `onnxruntime_onnx` and
    `default_model_filename: model.onnx`, so it needs
    `triton_models/{yolo26x,dinov3-512,dinov3-224}/1/model.onnx`. On GPU it needs
@@ -667,10 +669,11 @@ frame can present many inputs at once.
 4. **Working directory is the crate root.** Both `secrets/config.yaml`
    (`config.rs:252`) and `secrets/libclient_video.so` (`client_video.rs:23`) resolve
    relative to the process CWD.
-5. **`device_type` matches the Triton profile you boot.** The client is what tells Triton
-   which platform to load, so booting the CPU compose profile with `device_type: GPU`
-   asks an unaccelerated Triton for a `tensorrt_plan`. There is no environment-variable
-   override; `secrets/config.yaml` is the only place to switch it.
+5. **`DEVICE_TYPE` is set, and matches the Triton profile you boot.** The client is what
+   tells Triton which platform to load, so pointing `DEVICE_TYPE=GPU` at the CPU compose
+   profile asks an unaccelerated Triton for a `tensorrt_plan`. The moon tasks set both
+   together, so this only needs thought when running by hand. The variable has no
+   default: unset, the process exits at config load naming it.
 
 ### Build
 
@@ -727,6 +730,16 @@ Kibana comes up with the Elastic stack on port 5601 — that is where the
 `elasticsearch-setup.md` Dev Tools commands are run, and where the written vectors can be
 inspected.
 
+### Environment
+
+| Variable | Required | Effect |
+| --- | --- | --- |
+| `DEVICE_TYPE` | **yes** | `CPU` or `GPU`, case-insensitive. Selects the Triton platform, model filename, instance kind, the `optimization` block, whether NVML runs, and each model's default precision. No default — unset, the process exits at config load naming the variable. Both moon tasks set it to match the Triton they boot. |
+| `RUST_LOG` | in practice | Nothing is logged when unset. Both moon tasks set `INFO`; a value exported in your shell takes precedence. |
+
+At startup the client logs one line per model reporting the resolved device, hardware
+name, precision, and whether that precision came from the config or the device default.
+
 Both client tasks set `RUST_LOG=INFO`; a `RUST_LOG` exported in your shell takes
 precedence.
 
@@ -739,7 +752,7 @@ The manual equivalent, if you are not going through moon:
 3. Apply the `elasticsearch-setup.md` commands in Kibana at `http://localhost:5601`.
 4. Place `libclient_video.so` in `client-image-retrieval/secrets/` and the models in
    `triton_models/<name>/1/model.{onnx,plan}`.
-5. `cd client-image-retrieval && RUST_LOG=INFO ./target/release/client`
+5. `cd client-image-retrieval && RUST_LOG=INFO DEVICE_TYPE=CPU ./target/release/client`
 
 ### What success looks like
 

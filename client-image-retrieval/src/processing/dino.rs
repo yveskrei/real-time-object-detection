@@ -183,7 +183,7 @@ pub async fn process_frame(
 
     // Pre process
     let measure_start = Instant::now();
-    let precision = inference_model.model_config().precision;
+    let precision = inference_model.model_config().precision();
     let frame_clone = Arc::clone(&frame);
     let pre_frame =
         tokio::task::spawn_blocking(move || preprocess_frame(&frame_clone, precision, target_size))
@@ -240,7 +240,7 @@ pub async fn process_bboxes(
 
     // Pre process
     let measure_start = Instant::now();
-    let precision = inference_model.model_config().precision;
+    let precision = inference_model.model_config().precision();
 
     let tasks: Vec<_> = bboxes
         .iter()

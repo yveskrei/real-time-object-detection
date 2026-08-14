@@ -29,10 +29,11 @@ document does not copy the file; that is a deliberate manual step.*
 **(b) The configured model is not in the Triton model repository.**
 `secrets/config.yaml` requests `name: yolo26x`, but `triton_models/` currently contains
 only `dinov3-224/1/model.plan`, `dinov3-512/1/model.plan` and `yolov9-e/1/model.plan`.
-Because `device_type` is `CPU` in the checked-in config, Triton will be asked to load
-`yolo26x` as `onnxruntime_onnx` with `default_model_filename: model.onnx`, i.e. it needs
-`triton_models/yolo26x/1/model.onnx`. On a GPU deployment it would need
-`triton_models/yolo26x/1/model.plan` instead. No `config.pbtxt` is required — the client
+Under `DEVICE_TYPE=CPU`, Triton will be asked to load `yolo26x` as `onnxruntime_onnx`
+with `default_model_filename: model.onnx`, i.e. it needs
+`triton_models/yolo26x/1/model.onnx`; under `DEVICE_TYPE=GPU` it needs
+`triton_models/yolo26x/1/model.plan` instead. Both may sit in the same version
+directory — the generated `default_model_filename` picks between them. No `config.pbtxt` is required — the client
 generates and uploads the model configuration itself (§6).
 
 Three more preconditions, less surprising but equally fatal:
@@ -42,11 +43,12 @@ Three more preconditions, less surprising but equally fatal:
 - **Working directory matters.** Both `secrets/config.yaml` (`src/utils/config.rs:246`)
   and `secrets/libclient_video.so` (`src/client_video.rs:23`) are resolved relative to
   the process CWD. Run the binary from the crate root.
-- **`device_type` must match the Triton profile you booted.** The client is what tells
-  Triton which platform to load, so booting the CPU compose profile while `config.yaml`
-  says `GPU` will ask an unaccelerated Triton for a `tensorrt_plan`. There is no
-  environment-variable override for this field; editing `secrets/config.yaml` is the
-  only way to switch.
+- **`DEVICE_TYPE` must be set, and must match the Triton profile you booted.** The
+  client is what tells Triton which platform to load, so pointing `DEVICE_TYPE=GPU` at
+  the CPU compose profile asks an unaccelerated Triton for a `tensorrt_plan`. The moon
+  tasks set both together — `client-detection:cpu` boots `services:triton-cpu` and
+  exports `DEVICE_TYPE=CPU` — so this only needs thought when running by hand. The
+  variable has no default: unset, the process exits at config load naming it.
 
 ---
 
@@ -78,7 +80,9 @@ main()                                        src/main.rs:8
       ├─ load_config_file()  reads ./secrets/config.yaml      :244
       ├─ init_logging(local)                                  :260
       ├─ per-source override + clamping                        :207-231
-      └─ device_type.hardware_name()  (NVML when GPU)          :164
+      ├─ DeviceType::from_env()  reads DEVICE_TYPE, required
+      ├─ device_type.hardware_name()  (NVML when GPU)          :164
+      └─ fill each model's absent precision from the device default
  └─ services::init_services(&cfg, Handle::current())          src/services.rs:24
       ├─ Services::new(...)                                    :51
       │    ├─ InferenceModels::new   → Triton client, server_ready, base request
@@ -548,9 +552,11 @@ it is parsed, clamped and then unused.
 
 ### `inference_config`
 
+The device is **not** configured here — it comes from the `DEVICE_TYPE` environment
+variable (see below).
+
 | Key | Type | Effect |
 | --- | --- | --- |
-| `device_type` | `GPU` \| `CPU` | Selects platform, model filename, instance kind, the `optimization` block, and whether NVML runs. |
 | `instances.default` | `u32` | Instance count when the hardware, or the purpose under that hardware, is not listed. |
 | `instances.custom` | `map<String, map<ModelPurpose, u32>>` | Keyed first by `hardware_name` — the literal `"CPU"`, or the NVML device name for GPU (e.g. `"NVIDIA GeForce RTX 4090"`) — then by `ModelPurpose`, so the count is tunable per hardware *and* per task. Resolved by `InstancesConfig::resolve` (`:78`), which falls back to `default` when either level is absent. |
 | `models` | `map<ModelPurpose, ModelConfig>` | Currently `FrameDetection` is the only `ModelPurpose` variant (`:109`). |
@@ -561,7 +567,7 @@ it is parsed, clamped and then unused.
 | --- | --- |
 | `name` | Triton model name; must match the directory in `triton_models/`. |
 | `model_type` | `YOLOV9` or `YOLO26` — selects the decoder. |
-| `precision` | `FP32` or `FP16`. Becomes `TYPE_FP32`/`TYPE_FP16` in the generated config, the request datatype, the preprocessing output format, and the decoder's element width. One knob, four consumers. |
+| `precision` | Optional. `FP32` or `FP16`; omit to take the device default — FP32 under `DEVICE_TYPE=CPU`, FP16 under `GPU`. Becomes `TYPE_FP32`/`TYPE_FP16` in the generated config, the request datatype, the preprocessing output format, and the decoder's element width. One knob, four consumers — so an explicit value must match the precision the artifact was built at. |
 | `input_name` / `output_name` | Tensor names as compiled into the model. |
 | `input_shape` | Without the batch dimension, e.g. `[3, 640, 640]`. The **last** element is the letterbox target size. |
 | `output_shape` | Must be 2-dimensional. `[4 + classes, anchors]` for YOLOv9; `[max_detections, 6]` for YOLO26. |
@@ -625,8 +631,15 @@ moon run services:triton-logs     # follow Triton's output
 moon run services:triton-down     # stop it (names both profiles)
 ```
 
-Both client tasks set `RUST_LOG=INFO` (§Logging); a `RUST_LOG` exported in your shell
-takes precedence.
+### Environment
+
+| Variable | Required | Effect |
+| --- | --- | --- |
+| `DEVICE_TYPE` | **yes** | `CPU` or `GPU`, case-insensitive. Selects the Triton platform, model filename, instance kind, the `optimization` block, whether NVML runs, and each model's default precision. No default — unset, the process exits at config load naming the variable. Both moon tasks set it to match the Triton they boot. |
+| `RUST_LOG` | in practice | `EnvFilter::from_default_env()` carries no directives when unset, so nothing is logged (§Logging). Both moon tasks set `INFO`; a value exported in your shell takes precedence. |
+
+At startup the client logs one line per model reporting the resolved device, hardware
+name, precision, and whether that precision came from the config or the device default.
 
 The manual equivalent, if you are not going through moon:
 
@@ -635,7 +648,7 @@ The manual equivalent, if you are not going through moon:
    `cd services && docker compose -f docker-compose-triton.yml --profile cpu up --detach --wait`
 2. Place `libclient_video.so` in `client-object-detection/secrets/` and the model in
    `triton_models/<name>/1/model.{onnx,plan}` (§1).
-3. `cd client-object-detection && RUST_LOG=INFO ./target/release/client`
+3. `cd client-object-detection && RUST_LOG=INFO DEVICE_TYPE=CPU ./target/release/client`
 
 The sibling script is worth reading as a template but is **not** directly reusable: it
 references `../docker-compose.yml`, which has been split into the three per-service

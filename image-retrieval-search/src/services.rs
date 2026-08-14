@@ -62,7 +62,7 @@ impl Services {
             .context("Error initiating Redis")?;
         
         // Initiate statistics
-        let statistics = Statistics::new(app_config.inference_config().device_type)
+        let statistics = Statistics::new(app_config.device_type())
             .context("Error intiating statistics")?;
 
         // Initiate inference models
