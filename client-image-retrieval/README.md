@@ -1,7 +1,12 @@
 # Client Image Retrieval
 The following project allows consuming a large scale of video sources, ingesting the raw frames into `raw vectors` and `metadata` (Using an embedding model - currently supporting **DINOv3**), indexing them eventually in `ElasticSearch`, in order to later search upon the same indexed frames.
 
-## Architecture overview
+Get started by running the following command:
+```bash
+moon run client-retrieval:(gpu/cpu)
+```
+
+## Overview
 The following diagram emphesizes the architecture of the whole Image Retrieval chain.<br>
 This project is the `FEED` part of this chain:<br>
 ![Architecture](../assets/image-retrieval.png)

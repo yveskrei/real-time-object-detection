@@ -1,7 +1,12 @@
 # Image Retrieval Search
 The following project exposes an API interface, allowing users to upload custom images (which are then passed through an embedding model - currently supporting **DINOv3**) and **perform search** on a pool of previously indexed video frames, matching the images to similar candidates using KNN search, as part of **ElasticSearch**'s vector DB functionality.
 
-## Architecture overview
+Get started by running the following command:
+```bash
+moon run retrieval-search:(gpu/cpu)
+```
+
+## Overview
 The following diagram emphesizes the architecture of the whole Image Retrieval chain.<br>
 This project is the `SEARCH` part of this chain:<br>
 ![Architecture](../assets/image-retrieval.png)

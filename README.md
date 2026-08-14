@@ -7,6 +7,7 @@ The projects are the following:
 * **[Model Optimization](model-optimization)** - Set of scripts dedicated to converting a machine learning model into `ONNX`/`TensorRT` at specific settings, to allow highter throughput when used with other applications
 
 ## Prerequisites
+* **Moon** - Repository task runner
 - **Rust** toolchain installed for building the application.
 To get started with running the application, you must have the following prerequisites:
 - A machine with a **compatible NVIDIA GPU** and the necessary drivers installed to gain the most out of your hardware. Alternatively you can use **CPU**.
